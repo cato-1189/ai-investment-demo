@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scoring output phase2.v1",
+  "type": "object",
+  "required": [
+    "ticker",
+    "company",
+    "country",
+    "sector",
+    "data_quality",
+    "metrics",
+    "scores",
+    "total_score",
+    "alerts"
+  ],
+  "properties": {
+    "ticker": {
+      "type": "string",
+      "minLength": 1
+    },
+    "company": {
+      "type": "string",
+      "minLength": 1
+    },
+    "country": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sector": {
+      "type": "string",
+      "minLength": 1
+    },
+    "data_quality": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    },
+    "avg_volume_usd": {
+      "type": "number"
+    },
+    "price_close": {
+      "type": "number"
+    },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "pe_ttm",
+        "fcf_yield",
+        "roe",
+        "net_debt_ebitda",
+        "revenue_growth",
+        "drawdown_52w",
+        "momentum_6m"
+      ],
+      "properties": {
+        "pe_ttm": {
+          "type": "number"
+        },
+        "fcf_yield": {
+          "type": "number"
+        },
+        "roe": {
+          "type": "number"
+        },
+        "net_debt_ebitda": {
+          "type": "number"
+        },
+        "revenue_growth": {
+          "type": "number"
+        },
+        "drawdown_52w": {
+          "type": "number"
+        },
+        "momentum_6m": {
+          "type": "number"
+        }
+      }
+    },
+    "scores": {
+      "type": "object",
+      "required": [
+        "valuation",
+        "business_quality",
+        "financial_strength",
+        "growth",
+        "momentum_reversal",
+        "risk",
+        "data_quality"
+      ],
+      "properties": {
+        "valuation": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "business_quality": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "financial_strength": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "growth": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "momentum_reversal": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "risk": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "data_quality": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "total_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "alerts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "title": "Risk engine final decision phase2.v1",
+  "type": "object",
+  "required": [
+    "as_of_date",
+    "ticker",
+    "company",
+    "decision_agent_action",
+    "audit_agent_result",
+    "risk_rules_triggered",
+    "final_decision",
+    "final_weight",
+    "allocated_amount_usd",
+    "position_size_change_usd",
+    "reason_for_adjustment",
+    "monitoring_conditions",
+    "next_review_date",
+    "human_override_available"
+  ],
+  "properties": {
+    "as_of_date": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ticker": {
+      "type": "string",
+      "minLength": 1
+    },
+    "company": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_agent_action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "audit_agent_result": {
+      "type": "string",
+      "minLength": 1
+    },
+    "risk_rules_triggered": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "final_decision": {
+      "type": "string",
+      "enum": [
+        "EXECUTE_BUY_DEMO",
+        "BLOCKED",
+        "WATCHLIST",
+        "NEED_MORE_DATA"
+      ]
+    },
+    "final_weight": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "allocated_amount_usd": {
+      "type": "number"
+    },
+    "position_size_change_usd": {
+      "type": "number"
+    },
+    "reason_for_adjustment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason_for_blocking": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "monitoring_conditions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "next_review_date": {
+      "type": "string",
+      "minLength": 1
+    },
+    "human_override_available": {
+      "type": "boolean"
+    }
+  }
+}

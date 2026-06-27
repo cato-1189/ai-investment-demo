@@ -1,0 +1,79 @@
+{
+  "title": "Data quality report phase2.v1",
+  "type": "object",
+  "required": [
+    "run_id",
+    "date",
+    "source",
+    "total_assets_checked",
+    "quality_counts",
+    "flagged_assets",
+    "external_sources_used"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "date": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "local_fixture"
+      ]
+    },
+    "total_assets_checked": {
+      "type": "integer"
+    },
+    "quality_counts": {
+      "type": "object",
+      "required": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ],
+      "properties": {
+        "HIGH": {
+          "type": "integer"
+        },
+        "MEDIUM": {
+          "type": "integer"
+        },
+        "LOW": {
+          "type": "integer"
+        }
+      }
+    },
+    "flagged_assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "ticker",
+          "alerts"
+        ],
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "minLength": 1
+          },
+          "alerts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "external_sources_used": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    }
+  }
+}
