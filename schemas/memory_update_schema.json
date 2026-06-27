@@ -1,0 +1,67 @@
+{
+  "title": "Memory update phase2.v1",
+  "type": "object",
+  "required": [
+    "run_id",
+    "date",
+    "update_status",
+    "items",
+    "human_readable_summary"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "date": {
+      "type": "string",
+      "minLength": 1
+    },
+    "update_status": {
+      "type": "string",
+      "enum": [
+        "MOCK_RECORDED",
+        "SKIPPED",
+        "FAILED"
+      ]
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "ticker",
+          "fact_type",
+          "summary",
+          "source_run_id",
+          "verified"
+        ],
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fact_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "human_readable_summary": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

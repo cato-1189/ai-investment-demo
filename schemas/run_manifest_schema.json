@@ -1,0 +1,94 @@
+{
+  "title": "Run manifest phase2.v1",
+  "type": "object",
+  "required": [
+    "run_id",
+    "date",
+    "phase",
+    "mode",
+    "allow_real_orders",
+    "external_apis_used",
+    "llms_used",
+    "broker_connected",
+    "schemas_version",
+    "prompts_loaded",
+    "memory_files",
+    "validation_summary"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "date": {
+      "type": "string",
+      "minLength": 1
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "FASE_2"
+      ]
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "DEMO_PAPER_TRADING"
+      ]
+    },
+    "allow_real_orders": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    },
+    "external_apis_used": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    },
+    "llms_used": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    },
+    "broker_connected": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    },
+    "schemas_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "prompts_loaded": {
+      "type": "object"
+    },
+    "memory_files": {
+      "type": "object"
+    },
+    "validation_summary": {
+      "type": "object",
+      "required": [
+        "status",
+        "checked_outputs",
+        "invalid_outputs"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checked_outputs": {
+          "type": "integer"
+        },
+        "invalid_outputs": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

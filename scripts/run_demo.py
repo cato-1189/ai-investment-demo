@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fase 1: DEMO end-to-end sin LLM, APIs externas, datos reales ni broker."""
+"""Fase 2: DEMO con contratos de datos, sin LLMs/APIs/broker."""
 from __future__ import annotations
 
 import argparse
@@ -11,12 +11,14 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from schema_validation import SchemaValidationError, assert_valid, load_schema, validate_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "config_demo.yaml"
 FIXTURE_PATH = ROOT / "data" / "fixtures" / "demo_assets.json"
 TEMPLATE_DIR = ROOT / "memory_templates"
+SCHEMA_DIR = ROOT / "schemas"
 
 PROMPT_KEYS = [
     "data_scoring_agent",
@@ -216,6 +218,22 @@ def score_asset(asset: dict[str, Any], weights: dict[str, float]) -> dict[str, A
     return {**asset, "scores": scores, "total_score": round(total, 2), "alerts": alerts}
 
 
+def mock_research(asset: dict[str, Any], today: str) -> dict[str, Any]:
+    return {
+        "as_of_date": today,
+        "ticker": asset["ticker"],
+        "company": asset["company"],
+        "research_status": "MOCK_PLACEHOLDER",
+        "summary": "Research mock Fase 2: contrato reservado para integración futura, sin LLM ni datos reales.",
+        "positive_factors": ["Score fixture disponible"],
+        "negative_factors": asset["alerts"],
+        "unknowns": ["No se consultaron fuentes externas", "No hay research cualitativo real"],
+        "sources": [],
+        "confidence": "LOW",
+        "data_quality": asset["data_quality"],
+    }
+
+
 def mock_decision(asset: dict[str, Any], config: dict[str, Any], today: str) -> dict[str, Any]:
     max_trade = config["portfolio_rules"]["max_single_trade_weight"]
     if asset["data_quality"] == "LOW":
@@ -387,7 +405,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
             writer.writerow({field: row.get(field) for field in fields})
 
 
-def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any]) -> None:
+def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any], validation_report: dict[str, Any]) -> None:
     lines = [
         f"# Reporte diario DEMO - {today}",
         "",
@@ -395,7 +413,8 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
         f"- Modo confirmado: `{config['system']['mode']}`",
         f"- Órdenes reales habilitadas: `{config['system']['allow_real_orders']}`",
         "- Fuente de datos: fixture/mock local, sin APIs externas.",
-        "- LLMs: no utilizados en Fase 1.",
+        "- LLMs: no utilizados en Fase 2.",
+        f"- Validación de contratos: `{validation_report['status']}` ({validation_report['valid_outputs']}/{validation_report['checked_outputs']} outputs válidos).",
         "",
         "## Estado de cartera",
         f"- Valor cartera DEMO: USD {portfolio['portfolio_value_usd']:.2f}",
@@ -415,17 +434,63 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
             lines.append(f"| {trade['ticker']} | {trade['action']} | {trade['amount_usd']:.2f} | {trade['real_order']} |")
     else:
         lines.append("| - | Sin operaciones ejecutadas en paper | 0.00 | false |")
-    lines += ["", "## Limitaciones Fase 1", "- Datos simulados; no representan precios ni fundamentals reales.", "- Decisiones y auditorías mock; no se usaron OpenAI, Claude ni Gemini.", "- No hay broker ni posibilidad de órdenes reales."]
+    lines += ["", "## Contratos Fase 2", "- Los outputs críticos se validan contra schemas versionados en `schemas/`.", "- Si un contrato crítico falla, la corrida termina con un error explícito antes de persistir el resultado inválido."]
+    lines += ["", "## Limitaciones Fase 2", "- Datos simulados; no representan precios ni fundamentals reales.", "- Research, decisiones y auditorías son mock; no se usaron OpenAI, Claude ni Gemini.", "- No hay broker ni posibilidad de órdenes reales."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def validate_output(name: str, value: Any, schema_name: str, report: dict[str, Any], critical: bool = True) -> None:
+    schema = load_schema(SCHEMA_DIR / schema_name)
+    errors = validate_schema(value, schema)
+    entry = {"name": name, "schema": schema_name, "valid": not errors, "errors": errors}
+    report["results"].append(entry)
+    if errors and critical:
+        raise SchemaValidationError(f"Output crítico inválido: {name}: " + "; ".join(errors))
+
+
+def validate_output_list(name: str, rows: list[dict[str, Any]], schema_name: str, report: dict[str, Any], critical: bool = True) -> None:
+    for idx, row in enumerate(rows):
+        validate_output(f"{name}[{idx}]", row, schema_name, report, critical)
+
+
+def summarize_validation_report(report: dict[str, Any]) -> dict[str, Any]:
+    checked = len(report["results"])
+    valid = sum(1 for item in report["results"] if item["valid"])
+    report["checked_outputs"] = checked
+    report["valid_outputs"] = valid
+    report["invalid_outputs"] = checked - valid
+    report["status"] = "VALID" if report["invalid_outputs"] == 0 else "INVALID"
+    return report
+
+
+def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: str) -> dict[str, Any]:
+    counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    flagged = []
+    for asset in scored:
+        counts[asset["data_quality"]] = counts.get(asset["data_quality"], 0) + 1
+        if asset["alerts"]:
+            flagged.append({"ticker": asset["ticker"], "alerts": asset["alerts"]})
+    return {"run_id": run_id, "date": today, "source": "local_fixture", "total_assets_checked": len(scored), "quality_counts": counts, "flagged_assets": flagged, "external_sources_used": False}
+
+
+def build_memory_update(run_id: str, today: str, decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]]) -> dict[str, Any]:
+    items = []
+    for decision, audit, final in zip(decisions, audits, finals):
+        items.append({"ticker": decision["ticker"], "fact_type": "demo_decision", "summary": f"{decision['decision']} / {audit['audit_result']} / {final['final_decision']}", "source_run_id": run_id, "verified": False})
+    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización mock de memoria para Fase 2; no contiene hechos de mercado verificados."}
+
+
+def build_run_manifest(run_id: str, today: str, config: dict[str, Any], prompts: dict[str, Any], memory: dict[str, str], validation_report: dict[str, Any]) -> dict[str, Any]:
+    return {"run_id": run_id, "date": today, "phase": "FASE_2", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": False, "llms_used": False, "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ejecuta Fase 1 DEMO paper trading sin LLM/APIs/broker.")
+    parser = argparse.ArgumentParser(description="Ejecuta Fase 2 DEMO con contratos, sin LLM/APIs/broker.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
-    run_id = f"{today}_demo_phase1_{stamp}"
+    run_id = f"{today}_demo_phase2_{stamp}"
 
     config = load_config()
     errors = validate_demo_safety(config)
@@ -444,21 +509,43 @@ def main() -> int:
     assets = read_json(FIXTURE_PATH, [])
     scored = sorted([score_asset(asset, config["scoring_weights"]) for asset in assets], key=lambda row: row["total_score"], reverse=True)
     candidates = scored[: config["candidate_filters"]["max_candidates_for_decision"]]
+    research_outputs = [mock_research(asset, today) for asset in candidates]
     decisions = [mock_decision(asset, config, today) for asset in candidates]
     audits = [mock_audit(asset, decision, config, today) for asset, decision in zip(candidates, decisions)]
     finals = [apply_risk(asset, decision, audit, portfolio, config, today) for asset, decision, audit in zip(candidates, decisions, audits)]
     assets_by_ticker = {a["ticker"]: a for a in scored}
     portfolio, trades = update_portfolio(portfolio, finals, assets_by_ticker, config, run_id, today)
+    data_quality_report = build_data_quality_report(scored, run_id, today)
+    memory_update = build_memory_update(run_id, today, decisions, audits, finals)
 
-    write_json(out_root / "run_manifest.json", {"run_id": run_id, "date": today, "phase": "FASE_1", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "prompts_loaded": prompts, "memory_files": memory})
+    validation_report = {"run_id": run_id, "date": today, "schema_version": "phase2.v1", "results": []}
+    validate_output_list("scoring_results", scored, "scoring_output_schema.json", validation_report)
+    validate_output_list("research_outputs", research_outputs, "research_output_schema.json", validation_report)
+    validate_output_list("mock_decisions", decisions, "decision_agent_output_schema.json", validation_report)
+    validate_output_list("mock_audits", audits, "audit_agent_output_schema.json", validation_report)
+    validate_output_list("risk_engine_results", finals, "risk_engine_final_decision_schema.json", validation_report)
+    validate_output_list("simulated_trades", trades, "simulated_trade_schema.json", validation_report)
+    validate_output("portfolio_snapshot", portfolio, "portfolio_snapshot_schema.json", validation_report)
+    validate_output("memory_update", memory_update, "memory_update_schema.json", validation_report)
+    validate_output("data_quality_report", data_quality_report, "data_quality_report_schema.json", validation_report)
+    summarize_validation_report(validation_report)
+    manifest = build_run_manifest(run_id, today, config, prompts, memory, validation_report)
+    validate_output("run_manifest", manifest, "run_manifest_schema.json", validation_report)
+    summarize_validation_report(validation_report)
+
+    write_json(out_root / "run_manifest.json", manifest)
     write_json(out_root / "scoring_results.json", scored)
     write_csv(out_root / "scoring_results.csv", scored, ["ticker", "company", "country", "sector", "data_quality", "total_score", "alerts"])
+    write_json(out_root / "mock_research.json", research_outputs)
     write_json(out_root / "mock_decisions.json", decisions)
     write_json(out_root / "mock_audits.json", audits)
     write_json(out_root / "risk_engine_results.json", finals)
     write_csv(out_root / "simulated_trades.csv", trades, ["run_id", "date", "ticker", "action", "amount_usd", "price", "shares", "real_order"])
     write_json(out_root / "portfolio_snapshot.json", portfolio)
-    generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio)
+    write_json(out_root / "memory_update.json", memory_update)
+    write_json(out_root / "data_quality_report.json", data_quality_report)
+    write_json(out_root / "validation_report.json", validation_report)
+    generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio, validation_report)
 
     portfolio_path = ROOT / config["context_management"]["memory_files"]["portfolio_state"]
     write_json(portfolio_path, portfolio)
@@ -469,6 +556,7 @@ def main() -> int:
 
     print(f"DEMO CONFIRMADA: mode={config['system']['mode']} allow_real_orders={config['system']['allow_real_orders']}")
     print("No se usaron APIs externas, LLMs ni broker. Todas las operaciones son simuladas.")
+    print(f"Contratos Fase 2: {validation_report['status']} ({validation_report['valid_outputs']}/{validation_report['checked_outputs']} outputs válidos)")
     print(f"Run ID: {run_id}")
     print(f"Outputs: {out_root.relative_to(ROOT)}")
     print(f"Log: {log_path.relative_to(ROOT)}")

@@ -1,0 +1,97 @@
+{
+  "title": "Research output phase2.v1",
+  "type": "object",
+  "required": [
+    "as_of_date",
+    "ticker",
+    "company",
+    "research_status",
+    "summary",
+    "positive_factors",
+    "negative_factors",
+    "unknowns",
+    "sources",
+    "confidence",
+    "data_quality"
+  ],
+  "properties": {
+    "as_of_date": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ticker": {
+      "type": "string",
+      "minLength": 1
+    },
+    "company": {
+      "type": "string",
+      "minLength": 1
+    },
+    "research_status": {
+      "type": "string",
+      "enum": [
+        "MOCK_PLACEHOLDER",
+        "READY_FOR_FUTURE_LLM",
+        "NEEDS_REAL_RESEARCH"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "positive_factors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "negative_factors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "url": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    },
+    "data_quality": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    }
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "title": "Audit agent output phase2.v1",
+  "type": "object",
+  "required": [
+    "as_of_date",
+    "ticker",
+    "company",
+    "decision_agent_recommendation",
+    "audit_result",
+    "objection_severity",
+    "original_weight",
+    "auditor_max_weight",
+    "main_objections",
+    "missing_evidence",
+    "contradictory_evidence",
+    "value_trap_risk",
+    "permanent_capital_loss_risk",
+    "catalyst_quality",
+    "conditions_to_approve",
+    "conditions_to_block",
+    "final_audit_comment"
+  ],
+  "properties": {
+    "as_of_date": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ticker": {
+      "type": "string",
+      "minLength": 1
+    },
+    "company": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_agent_recommendation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "audit_result": {
+      "type": "string",
+      "enum": [
+        "APPROVED",
+        "APPROVED_WITH_REDUCED_WEIGHT",
+        "BLOCKED",
+        "NEED_MORE_DATA"
+      ]
+    },
+    "objection_severity": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    },
+    "original_weight": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "auditor_max_weight": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "main_objections": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "missing_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contradictory_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "value_trap_risk": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    },
+    "permanent_capital_loss_risk": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    },
+    "catalyst_quality": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    },
+    "conditions_to_approve": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "conditions_to_block": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "final_audit_comment": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

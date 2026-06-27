@@ -1,0 +1,50 @@
+{
+  "title": "Simulated trade phase2.v1",
+  "type": "object",
+  "required": [
+    "run_id",
+    "date",
+    "ticker",
+    "action",
+    "amount_usd",
+    "price",
+    "shares",
+    "real_order"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "date": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ticker": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "BUY_DEMO",
+        "SELL_DEMO"
+      ]
+    },
+    "amount_usd": {
+      "type": "number"
+    },
+    "price": {
+      "type": "number"
+    },
+    "shares": {
+      "type": "number"
+    },
+    "real_order": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    }
+  }
+}

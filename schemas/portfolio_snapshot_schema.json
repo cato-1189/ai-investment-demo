@@ -1,0 +1,120 @@
+{
+  "title": "Portfolio snapshot phase2.v1",
+  "type": "object",
+  "required": [
+    "last_update",
+    "run_id",
+    "mode",
+    "base_currency",
+    "initial_capital_usd",
+    "cash_usd",
+    "portfolio_value_usd",
+    "positions",
+    "portfolio_metrics",
+    "open_risks",
+    "human_overrides_active"
+  ],
+  "properties": {
+    "last_update": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "DEMO_PAPER_TRADING"
+      ]
+    },
+    "base_currency": {
+      "type": "string",
+      "minLength": 1
+    },
+    "initial_capital_usd": {
+      "type": "number"
+    },
+    "cash_usd": {
+      "type": "number"
+    },
+    "portfolio_value_usd": {
+      "type": "number"
+    },
+    "positions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "ticker",
+          "company",
+          "shares",
+          "market_value_usd",
+          "weight"
+        ],
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "minLength": 1
+          },
+          "company": {
+            "type": "string",
+            "minLength": 1
+          },
+          "country": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sector": {
+            "type": "string",
+            "minLength": 1
+          },
+          "shares": {
+            "type": "number"
+          },
+          "price_close": {
+            "type": "number"
+          },
+          "market_value_usd": {
+            "type": "number"
+          },
+          "weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "portfolio_metrics": {
+      "type": "object",
+      "required": [
+        "number_of_positions",
+        "cash_weight"
+      ],
+      "properties": {
+        "number_of_positions": {
+          "type": "integer"
+        },
+        "cash_weight": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "open_risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "human_overrides_active": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
