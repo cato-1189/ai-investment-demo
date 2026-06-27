@@ -1,0 +1,52 @@
+PRINCIPIOS GENERALES PARA USAR CODEX / CLAUDE CODE
+
+Este proyecto debe ser desarrollado por la herramienta de coding agent, no por instrucciones rígidas del usuario.
+
+Objetivo de este documento:
+Orientar el comportamiento esperado del coding agent sin imponerle una estructura técnica cerrada, nombres de archivos obligatorios, librerías específicas ni fragmentos de código.
+
+Principios obligatorios:
+1. Primero entender el problema funcional completo antes de proponer implementación.
+2. Proponer la arquitectura más simple que cumpla el objetivo DEMO.
+3. Justificar decisiones técnicas antes de implementarlas.
+4. Evitar sobreingeniería.
+5. Priorizar trazabilidad, auditabilidad y facilidad de uso para una persona no técnica.
+6. Mantener reglas de riesgo y parámetros en configuración externa modificable por humano.
+7. Mantener prompts de agentes en archivos .txt separados.
+8. No ejecutar órdenes reales ni preparar integración operativa real con broker en esta etapa.
+9. Trabajar con datos al cierre de rueda, no realtime.
+10. Generar outputs fechados que permitan medir performance futura.
+11. Diseñar el sistema para poder evolucionar luego a realtime, sin implementarlo ahora.
+12. Documentar cómo ejecutar, revisar, pausar y modificar el sistema.
+
+Qué NO debe hacer el coding agent:
+1. No debe recibir una receta cerrada de código.
+2. No debe limitarse a copiar una estructura técnica predefinida.
+3. No debe hardcodear decisiones, tickers, resultados o reglas.
+4. No debe ocultar supuestos técnicos.
+5. No debe priorizar complejidad por encima de confiabilidad.
+6. No debe avanzar a una etapa posterior sin dejar validaciones mínimas funcionando.
+
+Criterio de éxito:
+El resultado debe permitir correr una demo diaria de inversión simulada donde una IA decide, otra IA audita, un motor de reglas externas limita, la cartera se actualiza en paper trading y el humano puede observar, intervenir o cambiar configuración sin ser parte obligatoria del circuito.
+
+PRINCIPIOS DE EFICIENCIA DE TOKENS
+1. Pedir a la herramienta que trabaje por fases y checkpoints, no con entregas gigantes sin validación.
+2. Mantener el contexto activo liviano: resumir decisiones técnicas tomadas, archivos relevantes y próximos pasos.
+3. Evitar pegar archivos completos si solo cambió una sección; usar diffs o referencias claras.
+4. Priorizar cambios incrementales y testeables.
+5. No solicitar explicaciones largas de código salvo ante errores, decisiones críticas o riesgos.
+6. Solicitar que documente supuestos y decisiones en archivos persistentes para no depender del contexto del chat.
+7. Cuando el contexto crezca, pedir una síntesis operativa del estado del proyecto y continuar desde esa síntesis.
+8. El uso eficiente de tokens no debe sacrificar validaciones, trazabilidad ni seguridad del modo DEMO.
+
+
+GESTIÓN DE VENTANA DE CONTEXTO Y MEMORIA EXTERNA
+1. No dependas de memoria interna, historial de chat ni contexto previo de la plataforma.
+2. Antes de operar, consultá el Context Pack preparado para tu rol.
+3. Si falta memoria relevante para una decisión, pedí que el sistema la recupere desde archivos externos en lugar de inferirla.
+4. No solicites ni consumas historia completa si no es necesaria para tu tarea.
+5. Usá memoria por activo, cartera, metodología, auditorías previas y post-mortems solo cuando sean relevantes para la decisión actual.
+6. Diferenciá memoria vigente, memoria obsoleta, conflicto de memoria y dato no verificado.
+7. Al finalizar, generá un resumen compacto de información nueva que debería persistirse en memoria.
+8. Si detectás que el contexto recibido es excesivo, indicá qué partes pueden excluirse en próximas corridas.

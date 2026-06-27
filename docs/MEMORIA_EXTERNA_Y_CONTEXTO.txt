@@ -1,0 +1,43 @@
+MEMORIA EXTERNA Y VENTANA DE CONTEXTO
+
+Objetivo
+El sistema no debe depender de la memoria interna ni del historial conversacional de ninguna IA. Toda continuidad histórica debe mantenerse en archivos externos, auditables y compactos.
+
+Por qué es necesario
+Las plataformas tienen límites de ventana de contexto. Si el proyecto crece, parte del historial se pierde o deja de estar disponible para el modelo. Para evitarlo, el sistema debe generar sus propios archivos de memoria.
+
+Principio operativo
+No se debe enviar todo el histórico a cada agente. El sistema debe construir un Context Pack específico para cada llamada a IA.
+
+Context Pack
+Es un paquete mínimo de contexto que se arma antes de cada llamada a IA. Debe contener solo la información necesaria para que ese agente haga su trabajo.
+
+Ejemplo:
+- Al decisor se le envían datos actuales, research, tesis vigente, cartera actual, restricciones y memoria del activo.
+- Al auditor se le envía lo mismo más la decisión del decisor y objeciones previas.
+- Al reporte se le envía la decisión final, explicación y cambios relevantes, no todo el dataset crudo.
+
+Archivos de memoria sugeridos
+- memory/project_state.md
+- memory/methodology_state.md
+- memory/portfolio_state.json
+- memory/decision_ledger.jsonl
+- memory/audit_ledger.jsonl
+- memory/asset_thesis_memory.jsonl
+- memory/rejected_assets_memory.jsonl
+- memory/performance_memory.csv
+- memory/postmortem_memory.md
+- memory/data_quality_memory.md
+- memory/human_overrides.md
+- memory/config_change_log.md
+
+Regla crítica
+Los outputs crudos se guardan para auditoría, pero la memoria operativa debe ser compacta. La IA debe recibir memoria resumida, trazable y relevante, no archivos completos sin filtrar.
+
+Modos de contexto
+FAST: cambios recientes, alertas y candidatos nuevos.
+NORMAL: contexto reciente + memoria por activo + cartera actual.
+DEEP: revisión ampliada con metodología, post-mortems y decisiones históricas relevantes.
+
+Criterio de éxito
+El sistema debe poder correr durante meses, mantener continuidad y explicar sus decisiones sin depender de que una plataforma recuerde conversaciones anteriores.

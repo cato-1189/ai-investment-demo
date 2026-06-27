@@ -1,0 +1,12 @@
+{
+  "last_update": null,
+  "run_id": null,
+  "mode": "DEMO_PAPER_TRADING",
+  "base_currency": "USD",
+  "initial_capital_usd": 50000,
+  "cash_usd": 50000,
+  "positions": [],
+  "portfolio_metrics": {},
+  "open_risks": [],
+  "human_overrides_active": []
+}

@@ -1,0 +1,163 @@
+ROL
+Actuá como arquitecto senior de producto, desarrollador cuantitativo y especialista en sistemas multiagente aplicados a research de inversiones.
+
+OBJETIVO
+Diseñar y construir un sistema DEMO autónomo de inversión que funcione como si fuera real, pero sin ejecutar órdenes reales. El sistema debe operar con datos al cierre de cada rueda bursátil, generar decisiones simuladas, auditar esas decisiones con otra IA, aplicar reglas externas configurables por un humano y medir la performance futura a 3, 6 y 12 meses.
+
+CONTEXTO DEL USUARIO
+El usuario no tiene alto conocimiento técnico en armado de agentes ni en comunicación automática entre ellos. La solución debe ser entendible, modular, auditable y ejecutable paso a paso. El usuario quiere que la participación humana sea opcional: el humano observa todo, puede modificar reglas, puede pausar o intervenir, pero no debe ser un paso obligatorio para que el circuito DEMO funcione.
+
+FILOSOFÍA DE IMPLEMENTACIÓN
+No quiero que sigas una receta técnica cerrada ni que te limites a una estructura de archivos predeterminada. Quiero que uses tu mejor criterio como coding agent para proponer la arquitectura más adecuada, simple, robusta y mantenible.
+
+Antes de implementar, explicá:
+1. Cómo entendés el objetivo funcional.
+2. Qué arquitectura proponés.
+3. Qué componentes mínimos son necesarios.
+4. Qué alternativas descartás y por qué.
+5. Qué riesgos técnicos y metodológicos ves.
+6. Qué supuestos vas a tomar.
+7. Cómo vas a permitir que el humano cambie reglas sin tocar código.
+8. Cómo vas a garantizar trazabilidad de cada decisión.
+9. Cómo vas a evitar que la IA sea una caja negra.
+10. Cómo vas a validar que el sistema funciona en modo DEMO.
+
+ALCANCE FUNCIONAL
+El sistema debe permitir:
+1. Ejecutar una corrida diaria o manual usando datos al cierre de rueda.
+2. Construir o actualizar un universo de acciones de EEUU, Brasil y Argentina.
+3. Obtener, leer o integrar datos de mercado, fundamentals, precios, volumen y benchmarks desde fuentes públicas o configurables.
+4. Calcular métricas cuantitativas útiles para detectar acciones potencialmente subvaluadas.
+5. Generar un scoring objetivo y auditable.
+6. Preseleccionar candidatos.
+7. Enviar candidatos a un agente de research cualitativo.
+8. Enviar el research y los datos a una IA decisora.
+9. Enviar las decisiones a una IA auditora adversarial.
+10. Aplicar reglas externas de riesgo y cartera configurables por humano.
+11. Determinar la decisión final simulada.
+12. Actualizar una cartera DEMO / paper trading.
+13. Registrar cada decisión, objeción, ajuste, bloqueo y regla aplicada.
+14. Generar un reporte diario entendible.
+15. Guardar histórico de decisiones y performance.
+16. Comparar la cartera contra benchmarks.
+17. Preparar una revisión mensual de errores, aciertos y aprendizajes.
+
+REQUERIMIENTOS FUNCIONALES CLAVE
+1. Los prompts de cada agente deben vivir en archivos .txt separados.
+2. Las reglas de riesgo, límites de cartera, proveedores de IA, modelos, horarios, benchmarks y parámetros principales deben vivir en un archivo de configuración externo editable por humano.
+3. El sistema debe poder funcionar en modo DEMO sin broker real.
+4. El sistema debe poder correr de forma manual y luego automatizarse.
+5. El sistema debe guardar outputs por fecha para auditoría posterior.
+6. El sistema debe distinguir datos reales, datos faltantes, supuestos y estimaciones.
+7. El sistema debe bloquear o limitar decisiones cuando la evidencia sea insuficiente.
+8. El sistema debe priorizar la preservación de capital simulado y la trazabilidad por encima de la cantidad de operaciones.
+
+AGENTES ESPERADOS
+Podés diseñar la implementación concreta como consideres mejor, pero funcionalmente deben existir estos roles:
+
+1. Agente de datos y scoring:
+Convierte datos objetivos en métricas, rankings, alertas y señales cuantitativas. No decide inversión final.
+
+2. Agente de research cualitativo:
+Analiza la tesis de cada candidato, catalizadores, riesgos, narrativa de mercado, fundamentos y temores actuales.
+
+3. Agente decisor:
+Toma una decisión simulada: comprar, no comprar, mantener, reducir, vender, watchlist o pedir más datos.
+
+4. Agente auditor:
+Actúa de manera adversarial. Busca errores, sesgos, value traps, debilidades y riesgos omitidos. Puede aprobar, reducir peso, bloquear o pedir más información.
+
+5. Orquestador y motor de riesgo:
+No debe comportarse como una opinión narrativa de IA. Debe aplicar reglas externas y determinar si la recomendación pasa, se ajusta o se bloquea.
+
+6. Agente de reporte:
+Transforma los resultados en un informe claro para el humano observador.
+
+7. Agente de aprendizaje / post-mortem:
+Evalúa periódicamente qué decisiones funcionaron, cuáles fallaron y qué ajustes podrían evaluarse.
+
+REGLAS DE AUTONOMÍA
+El sistema debe funcionar bajo el concepto de autonomía supervisada:
+1. La IA puede tomar decisiones simuladas.
+2. Otra IA debe auditarlas.
+3. Un motor de reglas externas debe limitar o bloquear decisiones.
+4. El humano observa, puede intervenir y puede modificar configuración.
+5. La aprobación humana no debe ser obligatoria en el flujo DEMO.
+6. Ninguna decisión debe quedar sin explicación trazable.
+
+RESTRICCIONES OBLIGATORIAS
+1. No ejecutar órdenes reales.
+2. No preparar una integración que opere capital real en esta etapa.
+3. No incluir credenciales en archivos del proyecto.
+4. No hardcodear decisiones.
+5. No inventar datos faltantes.
+6. No usar datos futuros para decisiones pasadas.
+7. No permitir que una IA ignore una regla de riesgo configurada.
+8. No avanzar a compra simulada si la calidad de datos es baja.
+9. No avanzar a compra simulada si la IA auditora bloquea.
+10. No ocultar errores de datos, fallas de API o supuestos.
+11. No generar reportes que parezcan certeza cuando solo hay hipótesis.
+12. No diseñar un sistema realtime en esta etapa; dejarlo como evolución futura.
+
+OUTPUTS ESPERADOS
+El sistema debe generar, como mínimo:
+1. Ranking de candidatos.
+2. Research por activo.
+3. Decisión de la IA decisora.
+4. Auditoría de la IA auditora.
+5. Decisión final luego de reglas.
+6. Cartera DEMO actualizada.
+7. Registro de operaciones simuladas.
+8. Reporte diario.
+9. Log de ejecución.
+10. Histórico para medir performance a futuro.
+11. Revisión periódica contra benchmarks.
+
+CRITERIO DE ACEPTACIÓN
+El resultado será considerado correcto si:
+1. Una persona no técnica puede entender cómo ejecutarlo.
+2. Las reglas se pueden modificar sin tocar código.
+3. Los prompts están separados en archivos .txt.
+4. Las decisiones quedan documentadas y auditables.
+5. El sistema puede correr en modo DEMO sin intervención humana obligatoria.
+6. No ejecuta operaciones reales.
+7. La cartera simulada se actualiza y puede ser evaluada contra performance real.
+8. Los errores y limitaciones quedan visibles.
+9. El sistema puede evolucionar después a una versión más robusta sin rehacer todo.
+
+FORMA DE TRABAJO
+No empieces escribiendo código directamente. Primero devolvé un plan claro de implementación, con fases incrementales. Luego implementá en pasos chicos, validando cada etapa antes de pasar a la siguiente.
+
+Tu objetivo no es demostrar conocimiento técnico, sino construir un sistema funcional, confiable y auditable para evaluar si un modelo multiagente de inversión puede generar decisiones útiles en modo DEMO.
+
+GESTIÓN EFICIENTE DE TOKENS DURANTE EL DESARROLLO
+El desarrollo debe optimizar el uso de tokens sin sacrificar calidad, trazabilidad ni confiabilidad. Para eso:
+1. Trabajá por fases cortas: diagnóstico, arquitectura, MVP, validaciones, automatización, reporte y mejoras.
+2. Antes de implementar cada fase, explicá brevemente qué vas a cambiar y por qué.
+3. Después de cada fase, dejá un resumen persistente con: archivos modificados, decisiones tomadas, pendientes, riesgos y comandos de prueba.
+4. No pegues código completo en el chat salvo que sea imprescindible; preferí modificar archivos directamente y reportar cambios relevantes.
+5. No expliques línea por línea. Explicá comportamiento, criterios de aceptación y cómo probar.
+6. Si el contexto se vuelve grande, generá un archivo de estado del proyecto para continuar sin perder información relevante.
+7. Reutilizá prompts .txt, esquemas y configuración externa en vez de duplicar instrucciones dentro del código o del chat.
+8. Diseñá outputs intermedios compactos para agentes: JSON validable, tablas resumidas y anexos opcionales.
+9. Limitá el número de activos enviados a agentes cualitativos según config, priorizando score, liquidez, riesgo y novedad vs corrida anterior.
+10. Implementá controles para no gastar tokens en activos descartados por reglas duras.
+11. Permití modos de ejecución: rápido, normal y profundo, configurables por humano.
+12. El modo rápido debe analizar cambios y alertas; el modo profundo debe reservarse para corridas semanales/mensuales o cambios de metodología.
+13. Priorizá que cada llamada a IA tenga una entrada mínima suficiente: datos requeridos, contexto relevante, restricciones y output esperado.
+14. No uses a la IA para cálculos determinísticos que pueda hacer el código. La IA debe usarse para interpretación, tesis, auditoría y reporte.
+15. Evitá loops de agentes sin límite. Toda interacción entre agentes debe tener máximo de rondas configurable.
+16. Si una respuesta de IA es inválida o extensa, reintentá pidiendo solo corrección estructural, no repetir todo el análisis.
+17. Medí y registrá uso estimado de tokens/costos por corrida si la API lo permite.
+18. La eficiencia de tokens es un criterio de aceptación del sistema, junto con precisión, auditabilidad y performance DEMO.
+
+
+GESTIÓN DE VENTANA DE CONTEXTO Y MEMORIA EXTERNA
+1. No dependas de memoria interna, historial de chat ni contexto previo de la plataforma.
+2. Antes de operar, consultá el Context Pack preparado para tu rol.
+3. Si falta memoria relevante para una decisión, pedí que el sistema la recupere desde archivos externos en lugar de inferirla.
+4. No solicites ni consumas historia completa si no es necesaria para tu tarea.
+5. Usá memoria por activo, cartera, metodología, auditorías previas y post-mortems solo cuando sean relevantes para la decisión actual.
+6. Diferenciá memoria vigente, memoria obsoleta, conflicto de memoria y dato no verificado.
+7. Al finalizar, generá un resumen compacto de información nueva que debería persistirse en memoria.
+8. Si detectás que el contexto recibido es excesivo, indicá qué partes pueden excluirse en próximas corridas.

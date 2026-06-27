@@ -1,0 +1,223 @@
+# Configuración DEMO editable por humano
+# No contiene credenciales. Las API keys deben guardarse como variables de entorno.
+
+system:
+  mode: "DEMO_PAPER_TRADING"
+  timezone: "America/Argentina/Buenos_Aires"
+  run_after_market_close: true
+  base_currency: "USD"
+  initial_capital_usd: 50000
+  allow_real_orders: false
+  human_approval_required: false
+  human_override_enabled: true
+
+schedule:
+  daily_run_cron_utc: "30 23 * * 1-5"  # referencia: 20:30 Argentina si UTC-3; ajustar por mercado/horario
+  monthly_review_day: 1
+
+markets:
+  include:
+    - "US"
+    - "BR"
+    - "AR"
+  benchmarks:
+    US: "SPY"
+    US_TECH: "QQQ"
+    BR: "EWZ"
+    AR: "ARGT"
+    CASH: "BIL"
+
+portfolio_rules:
+  max_positions: 15
+  min_positions: 8
+  max_weight_per_position: 0.08
+  min_weight_per_position: 0.02
+  max_weight_per_country: 0.45
+  max_weight_per_sector: 0.35
+  min_cash_weight: 0.05
+  max_single_trade_weight: 0.04
+  max_new_positions_per_day: 3
+  rebalance_frequency: "MONTHLY"
+
+risk_rules:
+  min_upside_downside_ratio: 2.0
+  block_if_data_quality_low: true
+  block_if_auditor_blocks: true
+  block_if_auditor_needs_more_data: true
+  block_if_value_trap_risk_high: true
+  min_avg_volume_usd: 1000000
+  max_net_debt_ebitda: 4.0
+  max_portfolio_daily_loss: 0.02
+  max_portfolio_monthly_loss: 0.06
+  freeze_new_buys_at_drawdown: 0.12
+  allow_low_liquidity_assets: false
+  allow_derivatives: false
+  allow_margin: false
+  allow_short_selling: false
+
+scoring_weights:
+  valuation: 0.25
+  business_quality: 0.20
+  financial_strength: 0.15
+  growth: 0.15
+  momentum_reversal: 0.10
+  risk: 0.10
+  data_quality: 0.05
+
+candidate_filters:
+  min_total_score: 65
+  min_data_quality: "MEDIUM"
+  max_candidates_for_research: 25
+  max_candidates_for_decision: 15
+
+agents:
+  data_scoring_agent:
+    prompt_file: "prompts/01_agente_datos_y_scoring.txt"
+    provider: "local_code"
+    model: null
+    temperature: 0.0
+  research_agent:
+    prompt_file: "prompts/02_agente_research_cualitativo.txt"
+    provider: "anthropic"
+    model: "claude-sonnet-latest"
+    temperature: 0.2
+  decision_agent:
+    prompt_file: "prompts/03_agente_decisor.txt"
+    provider: "openai"
+    model: "gpt-5.5"
+    temperature: 0.1
+  audit_agent:
+    prompt_file: "prompts/04_agente_auditor.txt"
+    provider: "google"
+    model: "gemini-2.5-pro"
+    temperature: 0.1
+  orchestrator_risk_agent:
+    prompt_file: "prompts/05_agente_orquestador_y_riesgo.txt"
+    provider: "local_code_plus_llm_optional"
+    model: null
+    temperature: 0.0
+  report_agent:
+    prompt_file: "prompts/06_agente_reporte.txt"
+    provider: "openai"
+    model: "gpt-5.5"
+    temperature: 0.2
+  learning_agent:
+    prompt_file: "prompts/07_agente_aprendizaje_y_post_mortem.txt"
+    provider: "anthropic"
+    model: "claude-sonnet-latest"
+    temperature: 0.2
+
+outputs:
+  save_json: true
+  save_markdown: true
+  save_csv: true
+  save_excel: true
+  save_html_report: true
+  save_pdf_report: false
+  daily_output_folder: "outputs/daily_runs"
+  portfolio_state_folder: "outputs/portfolio_state"
+  logs_folder: "logs"
+
+notifications:
+  enabled: false
+  channels:
+    email: false
+    slack: false
+    telegram: false
+  notify_on:
+    buys: true
+    sells: true
+    blocked_trades: true
+    critical_errors: true
+    monthly_review: true
+
+
+# Configuración para eficiencia de tokens y costos de IA
+token_efficiency:
+  enabled: true
+  default_run_mode: "normal"   # opciones sugeridas: fast, normal, deep
+  max_candidates_for_research_daily: 15
+  max_candidates_for_research_weekly: 30
+  max_audit_rounds_per_asset: 1
+  max_agent_retries: 2
+  skip_ai_research_if_blocked_by_hard_rules: true
+  prioritize_new_or_changed_candidates: true
+  include_only_relevant_context_per_agent: true
+  require_json_outputs_for_agent_handoff: true
+  store_run_summaries_for_context_reuse: true
+  generate_full_report_frequency: "weekly"
+  generate_compact_report_frequency: "daily"
+  track_token_usage_if_available: true
+  cost_alert_usd_per_run: 5.00
+  monthly_cost_alert_usd: 75.00
+
+
+# Gestión de ventana de contexto y memoria externa
+# Objetivo: no depender de la memoria interna de ChatGPT/Claude/Gemini/Codex.
+# El sistema debe mantener archivos persistentes y compactos que puedan ser consultados por agentes.
+context_management:
+  enabled: true
+  strategy: "external_memory_first"  # no confiar en memoria interna de plataforma
+  max_context_budget_tokens_per_agent_call: 12000
+  max_memory_tokens_per_agent_call: 4000
+  context_modes:
+    fast:
+      include_memory_scope: "minimal_delta"
+      max_assets_with_full_history: 3
+      include_full_decision_history: false
+    normal:
+      include_memory_scope: "relevant_recent_and_asset_specific"
+      max_assets_with_full_history: 10
+      include_full_decision_history: false
+    deep:
+      include_memory_scope: "expanded_with_methodology_and_postmortems"
+      max_assets_with_full_history: 25
+      include_full_decision_history: true
+  memory_root_folder: "memory"
+  run_context_pack_folder: "outputs/context_packs"
+  require_context_pack_before_llm_calls: true
+  refuse_to_send_raw_full_history_to_llm: true
+  summarize_before_context_limit: true
+  context_compaction_frequency: "daily"
+  full_memory_review_frequency: "monthly"
+  keep_raw_outputs_days: 365
+  keep_compact_memory_indefinitely: true
+  memory_files:
+    project_state: "memory/project_state.md"
+    methodology_state: "memory/methodology_state.md"
+    portfolio_state: "memory/portfolio_state.json"
+    decision_ledger: "memory/decision_ledger.jsonl"
+    audit_ledger: "memory/audit_ledger.jsonl"
+    asset_thesis_memory: "memory/asset_thesis_memory.jsonl"
+    rejected_assets_memory: "memory/rejected_assets_memory.jsonl"
+    performance_memory: "memory/performance_memory.csv"
+    postmortem_memory: "memory/postmortem_memory.md"
+    data_quality_memory: "memory/data_quality_memory.md"
+    human_overrides: "memory/human_overrides.md"
+    config_change_log: "memory/config_change_log.md"
+  memory_update_rules:
+    update_after_each_run: true
+    update_after_config_change: true
+    update_after_human_override: true
+    update_after_monthly_postmortem: true
+    separate_facts_from_opinions: true
+    include_source_run_id_for_every_memory_item: true
+    include_expiration_or_review_date_when_relevant: true
+    never_store_unverified_data_as_fact: true
+  context_pack_rules:
+    build_pack_per_agent: true
+    include_only_relevant_assets: true
+    include_current_config_digest: true
+    include_recent_changes_since_last_run: true
+    include_asset_specific_history_for_candidates: true
+    include_prior_decisions_for_existing_positions: true
+    include_auditor_objections_if_position_exists: true
+    include_postmortem_lessons_relevant_to_current_decision: true
+    include_human_overrides_always: true
+    include_full_raw_outputs_only_on_deep_mode: false
+  memory_quality_controls:
+    detect_conflicting_memory: true
+    mark_stale_memory: true
+    prevent_duplicate_memory_items: true
+    require_memory_diff_report: true
+    require_human_readable_memory_summary: true
