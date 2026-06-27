@@ -188,14 +188,14 @@ class Phase5MarketDataTests(unittest.TestCase):
         self.assertTrue(any("enabled=true" in e for e in run_demo.validate_market_data_safety(config)))
 
     def test_missing_data_blocks_asset_in_quality_report(self) -> None:
-        raw = {"provider": "stooq_csv", "as_of_date": self.today, "fetched_at": "2026-06-27T00:00:00+00:00", "assets": [{"ticker": "AAPL", "provider_symbol": "aapl.us", "raw": {"Symbol": "AAPL", "Date": "N/D", "Close": "N/D", "Volume": "N/D"}}], "errors": []}
+        raw = {"provider": "stooq_csv", "as_of_date": self.today, "fetched_at": "2026-06-27T00:00:00+00:00", "assets": [{"ticker": "ACME", "provider_symbol": "aapl.us", "raw": {"Symbol": "ACME", "Date": "N/D", "Close": "N/D", "Volume": "N/D"}}], "errors": []}
         assets, quality = run_demo.normalize_market_data(raw, self.config, self.today)
         self.assertEqual(assets[0]["data_quality"], "LOW")
-        self.assertIn("AAPL", quality["blocked_assets"])
+        self.assertIn("ACME", quality["blocked_assets"])
         self.assertTrue(quality["missing_data"])
 
     def test_quality_report_tracks_estimated_fundamentals(self) -> None:
-        raw = {"provider": "stooq_csv", "as_of_date": self.today, "fetched_at": "2026-06-27T00:00:00+00:00", "assets": [{"ticker": "AAPL", "provider_symbol": "aapl.us", "raw": {"Symbol": "AAPL", "Date": "2026-06-26", "Close": "200", "Volume": "1000000"}}], "errors": []}
+        raw = {"provider": "stooq_csv", "as_of_date": self.today, "fetched_at": "2026-06-27T00:00:00+00:00", "assets": [{"ticker": "ACME", "provider_symbol": "aapl.us", "raw": {"Symbol": "ACME", "Date": "2026-06-26", "Close": "200", "Volume": "1000000"}}], "errors": []}
         assets, quality = run_demo.normalize_market_data(raw, self.config, self.today)
         self.assertEqual(assets[0]["data_quality"], "MEDIUM")
         self.assertTrue(quality["estimated_data"])
@@ -208,6 +208,52 @@ class Phase5MarketDataTests(unittest.TestCase):
         final = run_demo.apply_risk(asset, decision, audit, {"portfolio_value_usd": 50000}, self.config, self.today)
         self.assertEqual(final["final_decision"], "BLOCKED")
         self.assertIn("block_if_data_quality_low", final["risk_rules_triggered"])
+
+
+class Phase6PerformanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = run_demo.load_config()
+        self.today = "2026-06-27"
+        fixture = run_demo.read_json(run_demo.FIXTURE_PATH)
+        self.assets = [run_demo.score_asset(a, self.config["scoring_weights"]) for a in fixture]
+        self.assets_by_ticker = {a["ticker"]: a for a in self.assets}
+        self.portfolio = {"portfolio_value_usd": 50000, "cash_usd": 40000, "positions": [{"ticker": "ACME", "company": "ACME", "country": "US", "sector": "Technology", "shares": 10, "price_close": 100, "market_value_usd": 1000}]}
+
+    def test_nav_marks_positions_to_market(self) -> None:
+        p = run_demo.mark_to_market_portfolio(dict(self.portfolio), self.assets_by_ticker)
+        expected = 40000 + 10 * self.assets_by_ticker["ACME"]["price_close"]
+        self.assertEqual(p["portfolio_value_usd"], round(expected, 2))
+
+    def test_return_calculation(self) -> None:
+        self.assertEqual(run_demo.pct_return(110, 100), 0.1)
+        self.assertIsNone(run_demo.pct_return(110, None))
+
+    def test_benchmark_snapshot_reports_missing_without_inventing(self) -> None:
+        rows, prices = run_demo.benchmark_snapshot(self.config, self.today, self.assets_by_ticker, {})
+        tickers = {r["ticker"]: r for r in rows}
+        self.assertIn("SPY", tickers)
+        self.assertTrue(tickers["ARGT"]["missing_data"])
+        self.assertNotIn("ARGT", prices)
+
+    def test_decision_tracking_and_forward_pending(self) -> None:
+        asset = self.assets_by_ticker["ACME"]
+        decision = run_demo.mock_decision(asset, self.config, self.today)
+        audit = run_demo.mock_audit(asset, decision, self.config, self.today)
+        final = run_demo.apply_risk(asset, decision, audit, {"portfolio_value_usd": 50000}, self.config, self.today)
+        tracking = run_demo.build_decision_tracking("test_run", self.today, [decision], [audit], [final], self.assets_by_ticker, self.config)
+        self.assertFalse(tracking[0]["real_order"])
+        pending = run_demo.forward_pending_rows(tracking, self.config)
+        self.assertEqual({int(r["window_months"]) for r in pending}, {3, 6, 12})
+        self.assertTrue(all(r["status"] == "PENDING" for r in pending))
+
+    def test_demo_safety_no_broker_and_real_order_false(self) -> None:
+        self.assertFalse(self.config["system"]["allow_real_orders"])
+        self.assertFalse(any("broker" in e.lower() for e in run_demo.validate_demo_safety(self.config)))
+        asset = self.assets_by_ticker["ACME"]
+        final = {"final_decision": "EXECUTE_BUY_DEMO", "allocated_amount_usd": 1000, "ticker": "ACME"}
+        p, trades = run_demo.update_portfolio({"portfolio_value_usd": 50000, "cash_usd": 50000, "positions": []}, [final], self.assets_by_ticker, self.config, "test_run", self.today)
+        self.assertTrue(trades)
+        self.assertTrue(all(t["real_order"] is False for t in trades))
 
 
 if __name__ == "__main__":
