@@ -204,6 +204,25 @@ context_management:
     include_source_run_id_for_every_memory_item: true
     include_expiration_or_review_date_when_relevant: true
     never_store_unverified_data_as_fact: true
+  context_pack_limits:
+    research:
+      max_tokens: 1800
+      max_items: 16
+    decision:
+      max_tokens: 2200
+      max_items: 18
+    audit:
+      max_tokens: 2200
+      max_items: 20
+    risk_orchestrator:
+      max_tokens: 2400
+      max_items: 22
+    report:
+      max_tokens: 1800
+      max_items: 16
+    learning_postmortem:
+      max_tokens: 1800
+      max_items: 18
   context_pack_rules:
     build_pack_per_agent: true
     include_only_relevant_assets: true
