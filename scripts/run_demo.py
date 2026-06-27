@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fase 2: DEMO con contratos de datos, sin LLMs/APIs/broker."""
+"""Fase 3: DEMO con memoria externa y context packs, sin LLMs/APIs/broker."""
 from __future__ import annotations
 
 import argparse
@@ -50,6 +50,145 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def estimate_tokens(value: Any) -> int:
+    """Estimación conservadora sin tokenizador externo: 1 token ~= 4 caracteres."""
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return max(1, (len(value) + 3) // 4)
+
+
+def config_digest(config: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(config, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def read_text(path: Path, default: str = "") -> str:
+    if not path.exists():
+        return default
+    return path.read_text(encoding="utf-8")
+
+
+def append_markdown_section(path: Path, title: str, bullets: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = read_text(path)
+    lines = [existing.rstrip(), "", f"## {title}", ""] if existing.strip() else [f"# {path.stem.replace('_', ' ').title()}", "", f"## {title}", ""]
+    lines.extend(f"- {bullet}" for bullet in bullets)
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def tail_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
+    if not path.exists() or limit <= 0:
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows[-limit:]
+
+
+def config_pack_limits(config: dict[str, Any], agent: str) -> dict[str, int]:
+    limits = config["context_management"].get("context_pack_limits", {}).get(agent, {})
+    return {
+        "max_tokens": int(limits.get("max_tokens", config["context_management"]["max_context_budget_tokens_per_agent_call"])),
+        "max_items": int(limits.get("max_items", 20)),
+    }
+
+
+def trim_pack_sections(pack: dict[str, Any], max_items: int) -> None:
+    for section in pack["sections"]:
+        content = section.get("content")
+        if isinstance(content, list) and len(content) > max_items:
+            section["content"] = content[-max_items:]
+            section["truncated"] = True
+
+
+def validate_context_pack_limits(pack: dict[str, Any], config: dict[str, Any], agent: str) -> dict[str, Any]:
+    limits = config_pack_limits(config, agent)
+    trim_pack_sections(pack, limits["max_items"])
+    tokens = estimate_tokens(pack)
+    while tokens > limits["max_tokens"] and pack["sections"]:
+        reducible = [s for s in pack["sections"] if isinstance(s.get("content"), list) and s["content"]]
+        if not reducible:
+            break
+        largest = max(reducible, key=lambda s: len(s["content"]))
+        largest["content"] = largest["content"][1:]
+        largest["truncated"] = True
+        tokens = estimate_tokens(pack)
+    pack["context_limits"] = {**limits, "estimated_tokens": tokens, "within_limit": tokens <= limits["max_tokens"]}
+    return pack["context_limits"]
+
+
+def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], research: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], memory_diff: dict[str, Any], out_root: Path) -> dict[str, Any]:
+    candidates = [a["ticker"] for a in scored[: config["candidate_filters"]["max_candidates_for_decision"]]]
+    mf = {k: ROOT / v for k, v in memory.items()}
+    common = {
+        "run_id": run_id,
+        "date": today,
+        "phase": "FASE_3",
+        "config_digest": config_digest(config),
+        "safety": {"mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": False, "llms_used": False, "broker_connected": False},
+    }
+    recent_decisions = tail_jsonl(mf["decision_ledger"], 30)
+    recent_audits = tail_jsonl(mf["audit_ledger"], 30)
+    thesis = tail_jsonl(mf["asset_thesis_memory"], 40)
+    rejected = tail_jsonl(mf["rejected_assets_memory"], 40)
+    relevant_thesis = [x for x in thesis if x.get("ticker") in candidates]
+    relevant_rejected = [x for x in rejected if x.get("ticker") in candidates]
+    overrides = read_text(mf["human_overrides"], "").strip()
+    methodology = read_text(mf["methodology_state"], "").strip()[:2400]
+    data_quality = read_text(mf["data_quality_memory"], "").strip()[:1800]
+    perf = read_text(mf["performance_memory"], "").strip().splitlines()[-12:]
+    packs = {
+        "research": [
+            {"name": "methodology_excerpt", "content": methodology},
+            {"name": "current_candidates", "content": [{"ticker": a["ticker"], "company": a["company"], "sector": a["sector"], "score": a["total_score"], "alerts": a["alerts"], "data_quality": a["data_quality"]} for a in scored if a["ticker"] in candidates]},
+            {"name": "asset_specific_thesis", "content": relevant_thesis},
+            {"name": "recent_memory_diff", "content": memory_diff["changes"]},
+        ],
+        "decision": [
+            {"name": "portfolio_snapshot", "content": portfolio},
+            {"name": "research_outputs", "content": research},
+            {"name": "prior_candidate_decisions", "content": [x for x in recent_decisions if x.get("ticker") in candidates]},
+            {"name": "human_overrides", "content": overrides},
+        ],
+        "audit": [
+            {"name": "decisions_to_audit", "content": decisions},
+            {"name": "research_evidence", "content": research},
+            {"name": "data_quality_memory", "content": data_quality},
+            {"name": "prior_auditor_objections", "content": [x for x in recent_audits if x.get("ticker") in candidates]},
+            {"name": "rejected_assets", "content": relevant_rejected},
+        ],
+        "risk_orchestrator": [
+            {"name": "portfolio_snapshot", "content": portfolio},
+            {"name": "risk_config", "content": {"portfolio_rules": config["portfolio_rules"], "risk_rules": config["risk_rules"]}},
+            {"name": "final_decisions", "content": finals},
+            {"name": "human_overrides", "content": overrides},
+        ],
+        "report": [
+            {"name": "run_summary", "content": {"candidates": candidates, "finals": finals, "positions": len(portfolio.get("positions", []))}},
+            {"name": "memory_diff", "content": memory_diff["changes"]},
+            {"name": "performance_recent", "content": perf},
+        ],
+        "learning_postmortem": [
+            {"name": "decisions", "content": decisions},
+            {"name": "audits", "content": audits},
+            {"name": "risk_results", "content": finals},
+            {"name": "memory_diff", "content": memory_diff["changes"]},
+        ],
+    }
+    pack_dir = out_root / "context_packs"
+    summary = {"folder": str(pack_dir.relative_to(ROOT)), "packs": {}}
+    for agent, sections in packs.items():
+        pack = {**common, "agent": agent, "purpose": "Contexto mínimo, relevante y auditable para agente futuro; no contiene historial completo bruto.", "sections": sections}
+        limits = validate_context_pack_limits(pack, config, agent)
+        write_json(pack_dir / f"{agent}.json", pack)
+        summary["packs"][agent] = {"path": str((pack_dir / f"{agent}.json").relative_to(ROOT)), **limits}
+    return summary
 
 
 def parse_scalar(value: str) -> Any:
@@ -477,20 +616,61 @@ def build_memory_update(run_id: str, today: str, decisions: list[dict[str, Any]]
     items = []
     for decision, audit, final in zip(decisions, audits, finals):
         items.append({"ticker": decision["ticker"], "fact_type": "demo_decision", "summary": f"{decision['decision']} / {audit['audit_result']} / {final['final_decision']}", "source_run_id": run_id, "verified": False})
-    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización mock de memoria para Fase 2; no contiene hechos de mercado verificados."}
+    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 3; no contiene hechos de mercado verificados."}
+
+
+def update_external_memory(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], data_quality_report: dict[str, Any]) -> dict[str, Any]:
+    before = {key: (ROOT / rel).read_text(encoding="utf-8") if (ROOT / rel).exists() else "" for key, rel in memory.items()}
+    changed: list[dict[str, Any]] = []
+    mf = {key: ROOT / rel for key, rel in memory.items()}
+
+    write_json(mf["portfolio_state"], portfolio)
+    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 3 ejecutada sin LLMs, APIs externas, datos reales ni broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
+    append_markdown_section(mf["methodology_state"], f"Revisión operativa {run_id}", ["Se mantiene metodología DEMO determinística basada en fixtures locales.", "Los hechos no verificados se registran explícitamente como no verificados."])
+    append_markdown_section(mf["data_quality_memory"], f"Calidad de datos {run_id}", [f"Fuente: {data_quality_report['source']}.", f"Activos revisados: {data_quality_report['total_assets_checked']}.", f"Conteo por calidad: {data_quality_report['quality_counts']}."])
+    append_markdown_section(mf["config_change_log"], f"Digest config {run_id}", [f"sha256: {config_digest(config)}.", "No se registraron credenciales ni integraciones operativas."])
+    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 3 valida persistencia de memoria y context packs; no evalúa performance real."])
+
+    with mf["performance_memory"].open("a", encoding="utf-8") as handle:
+        if not before.get("performance_memory", "").strip():
+            handle.write("date,run_id,portfolio_value_usd,cash_usd,positions,notes\n")
+        handle.write(f"{today},{run_id},{portfolio['portfolio_value_usd']},{portfolio['cash_usd']},{len(portfolio.get('positions', []))},demo_fixture_no_real_performance\n")
+
+    for decision, audit, final in zip(decisions, audits, finals):
+        item = {"run_id": run_id, "date": today, "ticker": decision["ticker"], "decision_agent_action": decision["decision"], "audit_result": audit["audit_result"], "final_action": final["final_decision"], "reason": final["reason_for_blocking"] or final["reason_for_adjustment"]}
+        append_jsonl(mf["decision_ledger"], item)
+        append_jsonl(mf["audit_ledger"], {"run_id": run_id, "date": today, "ticker": audit["ticker"], "audit_result": audit["audit_result"], "main_objections": audit["main_objections"], "value_trap_risk": audit["value_trap_risk"]})
+        append_jsonl(mf["asset_thesis_memory"], {"run_id": run_id, "date": today, "ticker": decision["ticker"], "thesis_type": "demo_mock", "summary": decision["main_thesis"], "verified": False, "review_date": final["next_review_date"]})
+        if final["final_decision"] in {"BLOCKED", "NEED_MORE_DATA"}:
+            append_jsonl(mf["rejected_assets_memory"], {"run_id": run_id, "date": today, "ticker": decision["ticker"], "status": final["final_decision"], "reason": final["reason_for_blocking"] or decision["reason_for_decision"], "review_date": final["next_review_date"]})
+
+    after = {key: (ROOT / rel).read_text(encoding="utf-8") if (ROOT / rel).exists() else "" for key, rel in memory.items()}
+    for key, rel in memory.items():
+        before_lines = len(before.get(key, "").splitlines())
+        after_lines = len(after.get(key, "").splitlines())
+        if before.get(key, "") != after.get(key, ""):
+            changed.append({"memory_key": key, "path": rel, "line_delta": after_lines - before_lines, "sha256_before": hashlib.sha256(before.get(key, "").encode("utf-8")).hexdigest(), "sha256_after": hashlib.sha256(after.get(key, "").encode("utf-8")).hexdigest()})
+    return {"run_id": run_id, "date": today, "summary": f"{len(changed)} archivos de memoria creados o actualizados.", "changes": changed}
+
+
+def write_memory_diff_markdown(path: Path, memory_diff: dict[str, Any]) -> None:
+    lines = [f"# Memory diff - {memory_diff['date']}", "", f"Run ID: `{memory_diff['run_id']}`", "", memory_diff["summary"], "", "| Memoria | Path | Delta líneas |", "|---|---|---:|"]
+    for change in memory_diff["changes"]:
+        lines.append(f"| {change['memory_key']} | `{change['path']}` | {change['line_delta']} |")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def build_run_manifest(run_id: str, today: str, config: dict[str, Any], prompts: dict[str, Any], memory: dict[str, str], validation_report: dict[str, Any]) -> dict[str, Any]:
-    return {"run_id": run_id, "date": today, "phase": "FASE_2", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": False, "llms_used": False, "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
+    return {"run_id": run_id, "date": today, "phase": "FASE_3", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": False, "llms_used": False, "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ejecuta Fase 2 DEMO con contratos, sin LLM/APIs/broker.")
+    parser = argparse.ArgumentParser(description="Ejecuta Fase 3 DEMO con memoria externa y context packs, sin LLM/APIs/broker.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
-    run_id = f"{today}_demo_phase2_{stamp}"
+    run_id = f"{today}_demo_phase3_{stamp}"
 
     config = load_config()
     errors = validate_demo_safety(config)
@@ -517,6 +697,8 @@ def main() -> int:
     portfolio, trades = update_portfolio(portfolio, finals, assets_by_ticker, config, run_id, today)
     data_quality_report = build_data_quality_report(scored, run_id, today)
     memory_update = build_memory_update(run_id, today, decisions, audits, finals)
+    memory_diff = update_external_memory(config, run_id, today, memory, scored, decisions, audits, finals, portfolio, data_quality_report)
+    context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root)
 
     validation_report = {"run_id": run_id, "date": today, "schema_version": "phase2.v1", "results": []}
     validate_output_list("scoring_results", scored, "scoring_output_schema.json", validation_report)
@@ -543,24 +725,26 @@ def main() -> int:
     write_csv(out_root / "simulated_trades.csv", trades, ["run_id", "date", "ticker", "action", "amount_usd", "price", "shares", "real_order"])
     write_json(out_root / "portfolio_snapshot.json", portfolio)
     write_json(out_root / "memory_update.json", memory_update)
+    write_json(out_root / "memory_diff.json", memory_diff)
+    write_memory_diff_markdown(out_root / "memory_diff.md", memory_diff)
+    write_json(out_root / "context_pack_summary.json", context_pack_summary)
     write_json(out_root / "data_quality_report.json", data_quality_report)
     write_json(out_root / "validation_report.json", validation_report)
     generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio, validation_report)
 
     portfolio_path = ROOT / config["context_management"]["memory_files"]["portfolio_state"]
     write_json(portfolio_path, portfolio)
-    for decision, audit, final in zip(decisions, audits, finals):
-        append_jsonl(ROOT / config["context_management"]["memory_files"]["decision_ledger"], {"run_id": run_id, "date": today, "ticker": decision["ticker"], "decision_agent_action": decision["decision"], "audit_result": audit["audit_result"], "final_action": final["final_decision"], "reason": final["reason_for_blocking"] or final["reason_for_adjustment"]})
-        append_jsonl(ROOT / config["context_management"]["memory_files"]["audit_ledger"], {"run_id": run_id, "date": today, "ticker": audit["ticker"], "audit_result": audit["audit_result"], "main_objections": audit["main_objections"], "value_trap_risk": audit["value_trap_risk"]})
-    append_jsonl(log_path, {"event": "run_finished", "run_id": run_id, "outputs": str(out_root.relative_to(ROOT)), "trades": len(trades), "positions": len(portfolio["positions"])})
+    append_jsonl(log_path, {"event": "run_finished", "run_id": run_id, "outputs": str(out_root.relative_to(ROOT)), "trades": len(trades), "positions": len(portfolio["positions"]), "context_packs": context_pack_summary["folder"]})
 
     print(f"DEMO CONFIRMADA: mode={config['system']['mode']} allow_real_orders={config['system']['allow_real_orders']}")
     print("No se usaron APIs externas, LLMs ni broker. Todas las operaciones son simuladas.")
-    print(f"Contratos Fase 2: {validation_report['status']} ({validation_report['valid_outputs']}/{validation_report['checked_outputs']} outputs válidos)")
+    print(f"Contratos Fase 2 compatibles: {validation_report['status']} ({validation_report['valid_outputs']}/{validation_report['checked_outputs']} outputs válidos)")
     print(f"Run ID: {run_id}")
     print(f"Outputs: {out_root.relative_to(ROOT)}")
     print(f"Log: {log_path.relative_to(ROOT)}")
     print(f"Reporte: {(out_root / 'daily_report.md').relative_to(ROOT)}")
+    print(f"Memory diff: {(out_root / 'memory_diff.md').relative_to(ROOT)}")
+    print(f"Context packs: {(out_root / 'context_packs').relative_to(ROOT)}")
     return 0
 
 

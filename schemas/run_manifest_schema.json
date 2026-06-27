@@ -27,7 +27,8 @@
     "phase": {
       "type": "string",
       "enum": [
-        "FASE_2"
+        "FASE_2",
+        "FASE_3"
       ]
     },
     "mode": {

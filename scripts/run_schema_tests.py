@@ -2,6 +2,7 @@
 """Tests básicos de contratos para Fase 2 sin dependencias externas."""
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -44,6 +45,30 @@ class SchemaContractTests(unittest.TestCase):
         for schema_name, value in cases:
             with self.subTest(schema=schema_name):
                 self.assertSchemaValid(schema_name, value)
+
+    def test_external_memory_update_and_context_packs(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            temp_root = Path(tmp)
+            config = dict(self.config)
+            context = dict(self.config["context_management"])
+            context["memory_files"] = {key: str(temp_root / Path(rel).name) for key, rel in self.config["context_management"]["memory_files"].items()}
+            config["context_management"] = context
+            memory = run_demo.ensure_memory(config, "test_run", self.today)
+            scored = [self.asset]
+            decisions = [self.decision]
+            audits = [self.audit]
+            finals = [self.final]
+            portfolio = dict(self.portfolio, positions=[], portfolio_metrics={"number_of_positions": 0, "cash_weight": 1.0}, mode=config["system"]["mode"], base_currency=config["system"]["base_currency"], initial_capital_usd=config["system"]["initial_capital_usd"], last_update=self.today, run_id="test_run", open_risks=[], human_overrides_active=[])
+            quality = run_demo.build_data_quality_report(scored, "test_run", self.today)
+            diff = run_demo.update_external_memory(config, "test_run", self.today, memory, scored, decisions, audits, finals, portfolio, quality)
+            self.assertTrue(diff["changes"])
+            out_root = temp_root / "outputs" / "2026-06-27" / "test_run"
+            summary = run_demo.build_context_packs(config, "test_run", self.today, memory, scored, [self.research], decisions, audits, finals, portfolio, diff, out_root)
+            expected_agents = {"research", "decision", "audit", "risk_orchestrator", "report", "learning_postmortem"}
+            self.assertEqual(set(summary["packs"]), expected_agents)
+            for agent, info in summary["packs"].items():
+                self.assertTrue((ROOT / info["path"]).exists(), agent)
+                self.assertTrue(info["within_limit"], agent)
 
     def test_invalid_output_is_rejected(self) -> None:
         schema = load_schema(SCHEMA_DIR / "decision_agent_output_schema.json")
