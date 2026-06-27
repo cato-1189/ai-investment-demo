@@ -29,7 +29,8 @@
       "enum": [
         "FASE_2",
         "FASE_3",
-        "FASE_4"
+        "FASE_4",
+        "FASE_5"
       ]
     },
     "mode": {
