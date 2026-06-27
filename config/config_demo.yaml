@@ -27,6 +27,45 @@ markets:
     AR: "ARGT"
     CASH: "BIL"
 
+
+# Capa de datos de mercado Fase 5: fixture por default; datos reales solo con habilitación explícita.
+market_data:
+  mode: "fixture"        # fixture | real
+  enabled: false          # debe ser true junto con mode=real para usar proveedor externo
+  provider: "fixture"    # fixture | stooq_csv
+  fallback_to_fixture: true
+  block_on_low_quality: true
+  min_quality_for_scoring: "MEDIUM"
+  snapshot_folder: "data/snapshots"
+  timeout_seconds: 20
+  universe:
+    - "AAPL"
+    - "MSFT"
+    - "NVDA"
+    - "AMZN"
+    - "GOOGL"
+    - "META"
+    - "JPM"
+    - "XOM"
+    - "KO"
+    - "WMT"
+    - "MELI"
+    - "YPF"
+    - "GGAL"
+    - "BMA"
+    - "PAM"
+    - "VALE"
+    - "PBR"
+    - "ITUB"
+    - "BBD"
+    - "ABEV"
+    - "EWZ"
+    - "BRZU"
+  providers:
+    stooq_csv:
+      requires_api_key: false
+      base_url: "https://stooq.com"
+
 portfolio_rules:
   max_positions: 15
   min_positions: 8

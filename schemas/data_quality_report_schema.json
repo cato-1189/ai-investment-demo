@@ -22,7 +22,8 @@
     "source": {
       "type": "string",
       "enum": [
-        "local_fixture"
+        "local_fixture",
+        "stooq_csv"
       ]
     },
     "total_assets_checked": {
@@ -70,10 +71,7 @@
       }
     },
     "external_sources_used": {
-      "type": "boolean",
-      "enum": [
-        false
-      ]
+      "type": "boolean"
     }
   }
 }

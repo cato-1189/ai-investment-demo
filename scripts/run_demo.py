@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fase 4: DEMO con integración LLM controlada, reversible y auditable."""
+"""Fase 5: DEMO con ingesta controlada de datos de cierre."""
 from __future__ import annotations
 
 import argparse
@@ -133,9 +133,9 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
     common = {
         "run_id": run_id,
         "date": today,
-        "phase": "FASE_4",
+        "phase": "FASE_5",
         "config_digest": config_digest(config),
-        "safety": {"mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config), "llms_used": llm_enabled(config), "broker_connected": False},
+        "safety": {"mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False},
     }
     recent_decisions = tail_jsonl(mf["decision_ledger"], 30)
     recent_audits = tail_jsonl(mf["audit_ledger"], 30)
@@ -195,6 +195,149 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
     return summary
 
 
+
+
+class MarketDataProviderError(RuntimeError):
+    """Error explícito de proveedor de datos de mercado."""
+
+
+def market_data_settings(config: dict[str, Any]) -> dict[str, Any]:
+    defaults = {
+        "mode": "fixture",
+        "enabled": False,
+        "provider": "fixture",
+        "fallback_to_fixture": True,
+        "block_on_low_quality": True,
+        "min_quality_for_scoring": "MEDIUM",
+        "snapshot_folder": "data/snapshots",
+        "timeout_seconds": 20,
+        "universe": [],
+        "providers": {},
+    }
+    settings = {**defaults, **config.get("market_data", {})}
+    if settings.get("mode") == "fixture":
+        settings["enabled"] = False
+    return settings
+
+
+def validate_market_data_safety(config: dict[str, Any]) -> list[str]:
+    settings = market_data_settings(config)
+    errors: list[str] = []
+    if settings.get("mode") not in {"fixture", "real"}:
+        errors.append("market_data.mode debe ser fixture o real")
+    if settings.get("mode") == "real" and not settings.get("enabled"):
+        errors.append("market_data.mode=real requiere market_data.enabled=true explícito")
+    if settings.get("enabled") and settings.get("mode") != "real":
+        errors.append("market_data.enabled=true requiere market_data.mode=real explícito")
+    if settings.get("provider") not in {"fixture", "stooq_csv"}:
+        errors.append(f"market_data.provider no soportado en Fase 5: {settings.get('provider')}")
+    return errors
+
+
+def fixture_raw_payload(today: str) -> dict[str, Any]:
+    return {"provider": "fixture", "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": read_json(FIXTURE_PATH, [])}
+
+
+def stooq_symbol(ticker: str) -> str:
+    return ticker.lower() if "." in ticker else f"{ticker.lower()}.us"
+
+
+def fetch_stooq_csv(universe: list[dict[str, Any]], today: str, timeout: int) -> dict[str, Any]:
+    rows = []
+    errors = []
+    for item in universe:
+        ticker = item["ticker"] if isinstance(item, dict) else str(item)
+        symbol = (item.get("provider_symbol") if isinstance(item, dict) else None) or stooq_symbol(ticker)
+        url = f"https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - proveedor explícito configurado
+                text = response.read().decode("utf-8")
+            parsed = list(csv.DictReader(text.splitlines()))
+            raw = parsed[0] if parsed else {}
+            rows.append({"ticker": ticker, "provider_symbol": symbol, "url": url, "raw": raw})
+        except Exception as exc:
+            errors.append({"ticker": ticker, "provider_symbol": symbol, "error": str(exc)})
+    return {"provider": "stooq_csv", "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": rows, "errors": errors}
+
+
+def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], today: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if raw_payload["provider"] == "fixture":
+        assets = []
+        for asset in raw_payload["assets"]:
+            cloned = json.loads(json.dumps(asset))
+            cloned.update({"data_source": "fixture", "as_of_date": today, "estimated_fields": [], "missing_fields": [], "provider_errors": []})
+            assets.append(cloned)
+        return assets, build_data_quality_report([], "pending", today, assets, raw_payload)
+
+    fixture_by_ticker = {a["ticker"]: a for a in read_json(FIXTURE_PATH, [])}
+    assets = []
+    required = ["price_close", "avg_volume_usd"]
+    for row in raw_payload.get("assets", []):
+        ticker = row["ticker"]
+        base = json.loads(json.dumps(fixture_by_ticker.get(ticker, {"ticker": ticker, "company": ticker, "country": "US", "market": "US", "sector": "Unknown", "currency": "USD", "metrics": {"pe_ttm": 15.0, "ev_ebitda": 9.0, "fcf_yield": 0.04, "roe": 0.10, "revenue_growth": 0.04, "net_debt_ebitda": 2.0, "momentum_6m": 0.0, "drawdown_52w": -0.10}})))
+        raw = row.get("raw", {})
+        missing = []
+        errors = []
+        close = raw.get("Close")
+        vol = raw.get("Volume")
+        try:
+            close_value = float(close) if close not in {None, "", "N/D"} else None
+        except ValueError:
+            close_value = None
+        try:
+            volume_value = float(vol) if vol not in {None, "", "N/D"} else None
+        except ValueError:
+            volume_value = None
+        if close_value is None:
+            missing.append("price_close")
+        else:
+            base["price_close"] = close_value
+        if volume_value is None or close_value is None:
+            missing.append("avg_volume_usd")
+        else:
+            base["avg_volume_usd"] = close_value * volume_value
+        for field in required:
+            if field not in base or base.get(field) is None:
+                missing.append(field)
+        if raw.get("Date") in {None, "", "N/D"}:
+            missing.append("provider_date")
+        # Fundamentals remain from fixture baseline and are explicitly estimated, never invented as real.
+        estimated = [f"metrics.{k}" for k in base.get("metrics", {})]
+        quality = "HIGH" if not missing and len(estimated) == 0 else "MEDIUM" if not missing else "LOW"
+        base.update({"data_source": "real_provider_with_fixture_fundamentals" if estimated else "real_provider", "provider": raw_payload["provider"], "provider_date": raw.get("Date"), "as_of_date": today, "data_quality": quality, "estimated_fields": estimated, "missing_fields": sorted(set(missing)), "provider_errors": errors})
+        assets.append(base)
+    error_by_ticker = {e.get("ticker"): e.get("error") for e in raw_payload.get("errors", [])}
+    for ticker, error in error_by_ticker.items():
+        if ticker not in {a["ticker"] for a in assets}:
+            base = json.loads(json.dumps(fixture_by_ticker.get(ticker, {"ticker": ticker, "company": ticker, "country": "US", "market": "US", "sector": "Unknown", "currency": "USD", "metrics": {"pe_ttm": 15.0, "ev_ebitda": 9.0, "fcf_yield": 0.04, "roe": 0.10, "revenue_growth": 0.04, "net_debt_ebitda": 2.0, "momentum_6m": 0.0, "drawdown_52w": -0.10}})))
+            base.update({"data_source": "real_provider_failed", "provider": raw_payload["provider"], "as_of_date": today, "data_quality": "LOW", "estimated_fields": [], "missing_fields": required, "provider_errors": [error]})
+            assets.append(base)
+    return assets, build_data_quality_report([], "pending", today, assets, raw_payload)
+
+
+def load_market_data(config: dict[str, Any], today: str, run_id: str, log_path: Path, out_root: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str]]:
+    settings = market_data_settings(config)
+    provider = "fixture" if not settings.get("enabled") else settings.get("provider")
+    append_jsonl(log_path, {"event": "market_data_started", "run_id": run_id, "provider": provider, "mode": settings.get("mode")})
+    try:
+        raw = fixture_raw_payload(today) if provider == "fixture" else fetch_stooq_csv(settings.get("universe", []), today, int(settings.get("timeout_seconds", 20)))
+    except Exception as exc:
+        append_jsonl(log_path, {"event": "market_data_provider_error", "run_id": run_id, "provider": provider, "error": str(exc)})
+        if not settings.get("fallback_to_fixture"):
+            raise MarketDataProviderError(str(exc)) from exc
+        raw = fixture_raw_payload(today)
+        raw["fallback_reason"] = str(exc)
+    normalized, quality = normalize_market_data(raw, config, today)
+    quality.update({"run_id": run_id, "date": today})
+    snap_dir = ROOT / settings.get("snapshot_folder", "data/snapshots") / today / run_id
+    write_json(snap_dir / "raw_market_data.json", raw)
+    write_json(snap_dir / "normalized_market_data.json", normalized)
+    write_json(snap_dir / "data_quality_report.json", quality)
+    write_json(out_root / "snapshots" / "raw_market_data.json", raw)
+    write_json(out_root / "snapshots" / "normalized_market_data.json", normalized)
+    paths = {"raw": str((snap_dir / "raw_market_data.json").relative_to(ROOT)), "normalized": str((snap_dir / "normalized_market_data.json").relative_to(ROOT)), "quality": str((snap_dir / "data_quality_report.json").relative_to(ROOT))}
+    append_jsonl(log_path, {"event": "market_data_finished", "run_id": run_id, "provider": raw.get("provider"), "assets": len(normalized), "blocked_assets": quality.get("blocked_assets", []), "snapshots": paths, "errors": raw.get("errors", [])})
+    return normalized, quality, paths
 
 
 class LLMConfigError(RuntimeError):
@@ -756,8 +899,8 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
         f"- Run ID: `{run_id}`",
         f"- Modo confirmado: `{config['system']['mode']}`",
         f"- Órdenes reales habilitadas: `{config['system']['allow_real_orders']}`",
-        "- Fuente de datos: fixture/mock local, sin APIs externas.",
-        "- LLMs: no utilizados en Fase 2.",
+        f"- Fuente de datos: `{market_data_settings(config).get('provider')}`; externas solo si market_data.enabled=true.",
+        "- LLMs: solo research_agent opcional; decision_agent y audit_agent siguen mock.",
         f"- Validación de contratos: `{validation_report['status']}` ({validation_report['valid_outputs']}/{validation_report['checked_outputs']} outputs válidos).",
         "",
         "## Estado de cartera",
@@ -779,7 +922,7 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
     else:
         lines.append("| - | Sin operaciones ejecutadas en paper | 0.00 | false |")
     lines += ["", "## Contratos Fase 2", "- Los outputs críticos se validan contra schemas versionados en `schemas/`.", "- Si un contrato crítico falla, la corrida termina con un error explícito antes de persistir el resultado inválido."]
-    lines += ["", "## Limitaciones Fase 4", "- Datos simulados; no representan precios ni fundamentals reales.", "- Solo research_agent puede usar LLM real; decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
+    lines += ["", "## Limitaciones Fase 5", "- Datos reales solo si config los habilita; fixtures siguen default y fallback.", "- decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -807,21 +950,53 @@ def summarize_validation_report(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
-def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: str) -> dict[str, Any]:
+def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: str, normalized_assets: list[dict[str, Any]] | None = None, raw_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    assets = normalized_assets if normalized_assets is not None else scored
+    provider = (raw_payload or {}).get("provider", "fixture")
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     flagged = []
-    for asset in scored:
-        counts[asset["data_quality"]] = counts.get(asset["data_quality"], 0) + 1
-        if asset["alerts"]:
-            flagged.append({"ticker": asset["ticker"], "alerts": asset["alerts"]})
-    return {"run_id": run_id, "date": today, "source": "local_fixture", "total_assets_checked": len(scored), "quality_counts": counts, "flagged_assets": flagged, "external_sources_used": False}
+    complete, missing, estimated, blocked = [], [], [], []
+    provider_errors = (raw_payload or {}).get("errors", [])
+    for asset in assets:
+        quality = asset.get("data_quality", "LOW")
+        counts[quality] = counts.get(quality, 0) + 1
+        alerts = list(asset.get("alerts", []))
+        missing_fields = asset.get("missing_fields", [])
+        estimated_fields = asset.get("estimated_fields", [])
+        if missing_fields:
+            alerts.append("MISSING_MARKET_DATA")
+            missing.append({"ticker": asset["ticker"], "fields": missing_fields})
+        if estimated_fields:
+            alerts.append("ESTIMATED_FIELDS")
+            estimated.append({"ticker": asset["ticker"], "fields": estimated_fields})
+        if quality == "LOW" or missing_fields:
+            blocked.append(asset["ticker"])
+        if alerts:
+            flagged.append({"ticker": asset["ticker"], "alerts": sorted(set(alerts))})
+        if not missing_fields and quality in {"HIGH", "MEDIUM"}:
+            complete.append(asset["ticker"])
+    return {
+        "run_id": run_id,
+        "date": today,
+        "source": "local_fixture" if provider == "fixture" else provider,
+        "total_assets_checked": len(assets),
+        "quality_counts": counts,
+        "flagged_assets": flagged,
+        "external_sources_used": provider != "fixture",
+        "complete_assets": complete,
+        "missing_data": missing,
+        "estimated_data": estimated,
+        "provider_errors": provider_errors,
+        "blocked_assets": sorted(set(blocked)),
+        "data_timestamp_utc": (raw_payload or {}).get("fetched_at", utc_now().isoformat()),
+    }
 
 
 def build_memory_update(run_id: str, today: str, decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]]) -> dict[str, Any]:
     items = []
     for decision, audit, final in zip(decisions, audits, finals):
         items.append({"ticker": decision["ticker"], "fact_type": "demo_decision", "summary": f"{decision['decision']} / {audit['audit_result']} / {final['final_decision']}", "source_run_id": run_id, "verified": False})
-    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 4; no contiene hechos de mercado verificados."}
+    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 5; datos de mercado pueden ser fixture o proveedor explícito según data_quality_report."}
 
 
 def update_external_memory(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], data_quality_report: dict[str, Any]) -> dict[str, Any]:
@@ -830,11 +1005,11 @@ def update_external_memory(config: dict[str, Any], run_id: str, today: str, memo
     mf = {key: ROOT / rel for key, rel in memory.items()}
 
     write_json(mf["portfolio_state"], portfolio)
-    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 4 ejecutada en DEMO; LLM opcional solo para research_agent y sin datos reales ni broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
+    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 5 ejecutada en DEMO; datos de cierre controlados solo si config los habilita y sin broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
     append_markdown_section(mf["methodology_state"], f"Revisión operativa {run_id}", ["Se mantiene metodología DEMO determinística basada en fixtures locales.", "Los hechos no verificados se registran explícitamente como no verificados."])
     append_markdown_section(mf["data_quality_memory"], f"Calidad de datos {run_id}", [f"Fuente: {data_quality_report['source']}.", f"Activos revisados: {data_quality_report['total_assets_checked']}.", f"Conteo por calidad: {data_quality_report['quality_counts']}."])
     append_markdown_section(mf["config_change_log"], f"Digest config {run_id}", [f"sha256: {config_digest(config)}.", "No se registraron credenciales ni integraciones operativas."])
-    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 4 valida capa LLM controlada; no evalúa performance real."])
+    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 5 valida ingesta controlada de datos; no evalúa performance real."])
 
     with mf["performance_memory"].open("a", encoding="utf-8") as handle:
         if not before.get("performance_memory", "").strip():
@@ -866,19 +1041,19 @@ def write_memory_diff_markdown(path: Path, memory_diff: dict[str, Any]) -> None:
 
 
 def build_run_manifest(run_id: str, today: str, config: dict[str, Any], prompts: dict[str, Any], memory: dict[str, str], validation_report: dict[str, Any]) -> dict[str, Any]:
-    return {"run_id": run_id, "date": today, "phase": "FASE_4", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
+    return {"run_id": run_id, "date": today, "phase": "FASE_5", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ejecuta Fase 4 DEMO con LLM opcional controlado, sin broker ni datos reales.")
+    parser = argparse.ArgumentParser(description="Ejecuta Fase 5 DEMO con datos de cierre controlados, sin broker.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
-    run_id = f"{today}_demo_phase4_{stamp}"
+    run_id = f"{today}_demo_phase5_{stamp}"
 
     config = load_config()
-    errors = validate_demo_safety(config) + validate_llm_safety(config)
+    errors = validate_demo_safety(config) + validate_market_data_safety(config) + validate_llm_safety(config)
     if errors:
         raise SystemExit("Validación DEMO falló: " + "; ".join(errors))
     prompts = load_prompts(config)
@@ -891,7 +1066,7 @@ def main() -> int:
 
     memory = ensure_memory(config, run_id, today)
     portfolio = load_portfolio(config)
-    assets = read_json(FIXTURE_PATH, [])
+    assets, data_quality_report, snapshot_paths = load_market_data(config, today, run_id, log_path, out_root)
     scored = sorted([score_asset(asset, config["scoring_weights"]) for asset in assets], key=lambda row: row["total_score"], reverse=True)
     candidates = scored[: config["candidate_filters"]["max_candidates_for_decision"]]
     research_outputs = [mock_research(asset, today) for asset in candidates]
@@ -900,7 +1075,9 @@ def main() -> int:
     finals = [apply_risk(asset, decision, audit, portfolio, config, today) for asset, decision, audit in zip(candidates, decisions, audits)]
     assets_by_ticker = {a["ticker"]: a for a in scored}
     portfolio, trades = update_portfolio(portfolio, finals, assets_by_ticker, config, run_id, today)
-    data_quality_report = build_data_quality_report(scored, run_id, today)
+    quality_provider = "fixture" if data_quality_report["source"] == "local_fixture" else data_quality_report["source"]
+    data_quality_report = build_data_quality_report(scored, run_id, today, scored, {"provider": quality_provider, "fetched_at": data_quality_report.get("data_timestamp_utc"), "errors": data_quality_report.get("provider_errors", [])})
+    data_quality_report["snapshot_paths"] = snapshot_paths
     memory_update = build_memory_update(run_id, today, decisions, audits, finals)
     memory_diff = update_external_memory(config, run_id, today, memory, scored, decisions, audits, finals, portfolio, data_quality_report)
     context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root)
@@ -946,7 +1123,7 @@ def main() -> int:
     append_jsonl(log_path, {"event": "run_finished", "run_id": run_id, "outputs": str(out_root.relative_to(ROOT)), "trades": len(trades), "positions": len(portfolio["positions"]), "context_packs": context_pack_summary["folder"]})
 
     print(f"DEMO CONFIRMADA: mode={config['system']['mode']} allow_real_orders={config['system']['allow_real_orders']}")
-    print("Broker/datos reales no usados. LLM real solo si fue habilitado explícitamente; operaciones siempre simuladas.")
+    print("Broker no usado. Datos reales solo si market_data.mode=real y enabled=true; operaciones siempre simuladas.")
     print(f"Contratos Fase 2 compatibles: {validation_report['status']} ({validation_report['valid_outputs']}/{validation_report['checked_outputs']} outputs válidos)")
     print(f"Run ID: {run_id}")
     print(f"Outputs: {out_root.relative_to(ROOT)}")

@@ -1,14 +1,14 @@
 # AI Investment Demo
 
-Sistema DEMO de inversión autónoma en modo paper trading. La Fase 4 agrega una capa LLM controlada, segura, auditable y reversible sobre los Context Packs de Fase 3. Por defecto todo corre en **mock**, sin credenciales, sin datos reales de mercado, sin broker y sin ejecución real de órdenes.
+Sistema DEMO de inversión autónoma en modo paper trading. La Fase 5 agrega ingesta controlada de datos de cierre para un universo acotado, con snapshots auditables, data quality report, fallback a fixtures y bloqueo por baja calidad. El sistema sigue sin broker, sin órdenes reales, sin automatización diaria y con `decision_agent`/`audit_agent` reales deshabilitados.
 
-## Ejecutar en modo mock recomendado
+## Ejecutar en modo fixture recomendado
 
 ```bash
 python scripts/run_demo.py --date 2026-06-27
 ```
 
-En este modo `config/config_demo.yaml` mantiene `llm.enabled: false`. No se necesita API key y la demo conserva compatibilidad con el comando histórico.
+Este es el modo default. No requiere credenciales ni red. Usa `data/fixtures/demo_assets.json`, genera snapshots marcados como fixture y mantiene compatibilidad con el comando histórico.
 
 ## Ejecutar tests básicos
 
@@ -16,147 +16,122 @@ En este modo `config/config_demo.yaml` mantiene `llm.enabled: false`. No se nece
 python scripts/run_schema_tests.py
 ```
 
-Los tests usan `unittest` de la librería estándar de Python y no requieren dependencias externas.
+Los tests usan `unittest` de la librería estándar. Cubren modo fixture, proveedor real deshabilitado, datos faltantes, snapshots, data quality report, validación de schemas, memoria/context packs, LLM opcional de Fase 4 y bloqueo por baja calidad.
 
-## Qué hace la Fase 4
+## Configurar fixture vs datos reales
 
-1. Lee `config/config_demo.yaml`.
-2. Valida `system.mode: DEMO_PAPER_TRADING` y `system.allow_real_orders: false`.
-3. Mantiene `llm.enabled: false` como default.
-4. Solo permite activar LLM real si `config/config_demo.yaml` lo declara explícitamente.
-5. Solo habilita un agente real de bajo riesgo: `research_agent`.
-6. Mantiene `decision_agent` y `audit_agent` en mock.
-7. Lee prompts desde archivos `.txt` configurados; no hardcodea prompts.
-8. Construye Context Packs por agente antes de cualquier llamada LLM.
-9. Si `research_agent` real está habilitado, envía solo el Context Pack del agente y solo hasta `llm.max_candidates_sent` candidatos.
-10. Valida la respuesta LLM contra `schemas/research_output_schema.json`.
-11. Si la respuesta es inválida, registra el error y aplica fallback a mock o bloqueo según config.
-12. Registra cada llamada LLM en `logs/<run_id>.jsonl` con run_id, agente, proveedor, modelo, prompt, context pack, output, validación, error y tokens/costos si el proveedor los informa.
-13. Aplica límites de seguridad: API key obligatoria en modo real, timeout, reintentos, máximo de candidatos, costo máximo y fallback.
-14. Genera outputs fechados, reporte humano, memoria externa, Context Packs y reporte de validación.
-
-## Configurar mock vs LLM real
-
-### Mock default
+### Fixture/mock default
 
 No cambiar nada:
 
 ```yaml
-llm:
+market_data:
+  mode: "fixture"
   enabled: false
-  real_agents: []
+  provider: "fixture"
 ```
 
-### LLM real controlado para research_agent
+### Datos reales de cierre bajo decisión humana
 
-Un humano puede editar manualmente `config/config_demo.yaml`:
+Un humano debe editar manualmente `config/config_demo.yaml` y habilitar explícitamente ambas banderas:
 
 ```yaml
-llm:
+market_data:
+  mode: "real"
   enabled: true
-  real_agents: ["research_agent"]
-  fallback_to_mock: true
-  block_on_invalid_response: false
-  max_candidates_sent: 3
-  max_retries: 1
-  timeout_seconds: 20
-  max_cost_usd_per_run: 1.00
+  provider: "stooq_csv"
+  fallback_to_fixture: true
+  block_on_low_quality: true
 ```
 
-Luego debe exportar la credencial del proveedor elegido por `agents.research_agent.provider`. La config actual deja preparado `anthropic` para research:
+Luego ejecutar:
 
 ```bash
-export ANTHROPIC_API_KEY="..."
 python scripts/run_demo.py --date 2026-06-27
 ```
 
-También queda preparado `openai` como proveedor soportado por la capa técnica, con credencial por variable de entorno:
+`stooq_csv` no requiere API key. Si el proveedor falla, el error se registra en logs; si `fallback_to_fixture: true`, la corrida vuelve a fixtures y lo marca claramente como fixture/mock. Si se desactiva el fallback, el error del proveedor bloquea la corrida.
 
-```bash
-export OPENAI_API_KEY="..."
+## Universo inicial editable
+
+La configuración deja un universo acotado y editable en `market_data.universe`:
+
+- Acciones líquidas de EEUU: `AAPL`, `MSFT`, `NVDA`, `AMZN`, `GOOGL`, `META`, `JPM`, `XOM`, `KO`, `WMT`.
+- ADRs argentinos principales: `MELI`, `YPF`, `GGAL`, `BMA`, `PAM`.
+- Brasil/ETFs vinculados: `VALE`, `PBR`, `ITUB`, `BBD`, `ABEV`, `EWZ`, `BRZU`.
+
+El usuario puede editar esa lista sin tocar código. En Fase 5 los fundamentals no provistos por el proveedor quedan marcados como `estimated_fields`; no se inventan como datos reales.
+
+## Snapshots auditables
+
+Cada corrida escribe snapshots en dos lugares:
+
+```text
+data/snapshots/<YYYY-MM-DD>/<run_id>/raw_market_data.json
+ data/snapshots/<YYYY-MM-DD>/<run_id>/normalized_market_data.json
+ data/snapshots/<YYYY-MM-DD>/<run_id>/data_quality_report.json
 ```
 
-Las API keys se leen exclusivamente desde variables de entorno declaradas en `llm.providers.<provider>.api_key_env`. Nunca se guardan en archivos versionados.
+También copia snapshots de la corrida dentro de:
 
-## Proveedores preparados
+```text
+outputs/daily_runs/<YYYY-MM-DD>/<run_id>/snapshots/
+```
 
-- `anthropic`: usado por `research_agent` en la configuración actual mediante `ANTHROPIC_API_KEY`.
-- `openai`: implementado en la capa de proveedor mediante `OPENAI_API_KEY`, listo para configurar en agentes permitidos de fases futuras.
+## Data quality report
 
-Otros proveedores mencionados en prompts/config, como `google`, no se ejecutan en Fase 4.
+`data_quality_report.json` identifica:
 
-## Validación de respuestas LLM
+- activos completos;
+- datos faltantes por campo;
+- datos estimados;
+- errores por proveedor;
+- activos bloqueados;
+- timestamp UTC de datos;
+- si se usaron fuentes externas.
 
-La respuesta del modelo debe ser un objeto JSON. El sistema intenta parsear ese JSON y lo valida contra `schemas/research_output_schema.json`. Si faltan campos, hay enums inválidos o el contenido no es JSON, la llamada queda marcada como inválida en logs.
+La calidad se resume como `HIGH`, `MEDIUM` o `LOW`. Si faltan precio de cierre, volumen o fecha del proveedor, el activo queda `LOW` y bloqueado. Si precio/volumen están presentes pero fundamentals vienen de fixture/base DEMO, queda como `MEDIUM` con campos estimados.
 
-- Con `fallback_to_mock: true` y `block_on_invalid_response: false`, el sistema vuelve a `mock_research` para ese candidato.
-- Con `block_on_invalid_response: true`, la corrida se bloquea con un error explícito.
+## Logs
 
-## Logs auditables
-
-La corrida escribe logs JSONL en:
+Cada corrida escribe:
 
 ```text
 logs/<run_id>.jsonl
 ```
 
-Cada evento `llm_call` incluye:
+Los eventos `market_data_started`, `market_data_provider_error` y `market_data_finished` muestran proveedor, modo, errores, cantidad de activos, activos bloqueados y paths de snapshots.
 
-- `run_id`
-- `agent`
-- `provider`
-- `model`
-- `prompt_file`
-- `prompt_sha256`
-- `context_pack`
-- `target_ticker`
-- `attempt`
-- `output`
-- `validation`
-- `usage`
-- `estimated_cost_usd`
-- `duration_seconds`
-- `error`
+## Seguridad DEMO/paper trading
 
-## Costos y tokens
+La Fase 5 mantiene:
 
-Si el proveedor devuelve `usage`, se guarda en el log. Si la capa puede estimar o recibir costo, acumula `estimated_cost_usd` y compara contra `llm.max_cost_usd_per_run`. Si se excede el máximo configurado, la corrida LLM se bloquea. En modo mock no hay costo real.
+- `system.mode: DEMO_PAPER_TRADING` obligatorio;
+- `system.allow_real_orders: false` obligatorio;
+- `real_order` siempre `false` en operaciones simuladas;
+- sin broker ni cuenta operativa;
+- sin GitHub Actions activado;
+- `decision_agent` y `audit_agent` reales sin conexión;
+- sin modificación automática de reglas humanas;
+- sin API keys hardcodeadas.
 
-## Outputs principales
+## Troubleshooting básico
 
-Cada corrida escribe en:
+- **Quiero correr sin red o sin credenciales:** usar el modo default `market_data.mode: fixture` y `enabled: false`.
+- **La config real falla al arrancar:** verificar que `market_data.mode: "real"` y `market_data.enabled: true` estén ambos seteados explícitamente.
+- **El proveedor devuelve datos incompletos:** revisar `data_quality_report.json` y `logs/<run_id>.jsonl`; el sistema no completa datos faltantes como reales.
+- **Aparecen activos bloqueados:** revisar `blocked_assets`, `missing_data` y las reglas `risk_rules.block_if_data_quality_low`.
+- **Necesito volver al modo seguro:** restaurar `market_data.mode: "fixture"`, `enabled: false`, `provider: "fixture"`.
 
-```text
-outputs/daily_runs/<YYYY-MM-DD>/<run_id>/
-```
+## Limitaciones de Fase 5
 
-Archivos relevantes:
-
-- `run_manifest.json`: modo DEMO, prompts cargados, memoria usada, LLMs usados/no usados y resumen de validación.
-- `scoring_results.json` y `scoring_results.csv`: ranking fixture validado.
-- `mock_research.json`: research final validado; puede contener salida LLM validada para los candidatos habilitados y mock para fallback/resto.
-- `mock_decisions.json`: decisiones mock validadas.
-- `mock_audits.json`: auditorías mock validadas.
-- `risk_engine_results.json`: reglas aplicadas y decisión final validada.
-- `simulated_trades.csv`: operaciones paper; `real_order` siempre es `false`.
-- `portfolio_snapshot.json`: cartera simulada.
-- `memory_update.json`, `memory_diff.json`, `memory_diff.md`: memoria externa y cambios auditables.
-- `context_pack_summary.json` y `context_packs/*.json`: paquetes mínimos por agente.
-- `validation_report.json`: resultado de validaciones de contratos.
-- `daily_report.md`: reporte humano básico.
-
-## Limitaciones de Fase 4
-
-- No consume datos reales de mercado.
-- No integra broker.
-- No activa GitHub Actions.
-- No ejecuta órdenes reales.
-- `real_order` permanece siempre en `false`.
-- Solo `research_agent` puede usar LLM real.
+- No hay automatización diaria.
+- No hay broker ni órdenes reales.
+- No hay recomendaciones financieras reales.
 - `decision_agent` y `audit_agent` siguen mock.
-- No se envía historial completo a modelos; se usan Context Packs compactos.
-- La salida LLM no constituye recomendación financiera real.
+- El proveedor real preparado es CSV público de Stooq; no todos los tickers/fundamentals pueden estar disponibles.
+- Los fundamentals básicos se usan solo si el proveedor los entrega; si no, quedan marcados como estimados o faltantes.
 
-## Para Fase 5
+## Para Fase 6
 
-Fase 5 debería definir si se habilita otro agente real, cómo mejorar estimación de costos por proveedor/modelo, cómo agregar evaluación humana de calidad de research, y cómo preparar datos externos sin romper las restricciones de no broker/no órdenes reales hasta que exista aprobación explícita.
+Fase 6 debería definir si se incorpora un proveedor pago/robusto de fundamentals, ampliar normalización multi-mercado, mejorar controles de moneda/FX, decidir si research cualitativo usa datos reales enriquecidos y diseñar revisión humana antes de cualquier paso hacia automatización. Broker y órdenes reales siguen fuera de alcance hasta aprobación explícita futura.

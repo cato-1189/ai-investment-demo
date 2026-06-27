@@ -162,5 +162,53 @@ class Phase4LLMTests(unittest.TestCase):
         self.assertEqual(summary["calls"], 1)
 
 
+class Phase5MarketDataTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = run_demo.load_config()
+        self.today = "2026-06-27"
+
+    def test_fixture_mode_is_default_and_generates_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp_name:
+            tmp = Path(tmp_name)
+            config = dict(self.config)
+            md = {**run_demo.market_data_settings(config), "snapshot_folder": str(tmp / "snapshots")}
+            config["market_data"] = md
+            out_root = tmp / "out"
+            log_path = tmp / "run.jsonl"
+            assets, quality, paths = run_demo.load_market_data(config, self.today, "test_run", log_path, out_root)
+            self.assertTrue(assets)
+            self.assertFalse(quality["external_sources_used"])
+            self.assertEqual(quality["source"], "local_fixture")
+            self.assertTrue((ROOT / paths["raw"]).exists())
+            self.assertTrue((ROOT / paths["normalized"]).exists())
+
+    def test_real_provider_disabled_validation_is_explicit(self) -> None:
+        config = dict(self.config)
+        config["market_data"] = {**run_demo.market_data_settings(config), "mode": "real", "enabled": False, "provider": "stooq_csv"}
+        self.assertTrue(any("enabled=true" in e for e in run_demo.validate_market_data_safety(config)))
+
+    def test_missing_data_blocks_asset_in_quality_report(self) -> None:
+        raw = {"provider": "stooq_csv", "as_of_date": self.today, "fetched_at": "2026-06-27T00:00:00+00:00", "assets": [{"ticker": "AAPL", "provider_symbol": "aapl.us", "raw": {"Symbol": "AAPL", "Date": "N/D", "Close": "N/D", "Volume": "N/D"}}], "errors": []}
+        assets, quality = run_demo.normalize_market_data(raw, self.config, self.today)
+        self.assertEqual(assets[0]["data_quality"], "LOW")
+        self.assertIn("AAPL", quality["blocked_assets"])
+        self.assertTrue(quality["missing_data"])
+
+    def test_quality_report_tracks_estimated_fundamentals(self) -> None:
+        raw = {"provider": "stooq_csv", "as_of_date": self.today, "fetched_at": "2026-06-27T00:00:00+00:00", "assets": [{"ticker": "AAPL", "provider_symbol": "aapl.us", "raw": {"Symbol": "AAPL", "Date": "2026-06-26", "Close": "200", "Volume": "1000000"}}], "errors": []}
+        assets, quality = run_demo.normalize_market_data(raw, self.config, self.today)
+        self.assertEqual(assets[0]["data_quality"], "MEDIUM")
+        self.assertTrue(quality["estimated_data"])
+        self.assertFalse(quality["blocked_assets"])
+
+    def test_low_quality_asset_is_blocked_by_risk(self) -> None:
+        asset = run_demo.score_asset({**run_demo.read_json(run_demo.FIXTURE_PATH)[0], "data_quality": "LOW"}, self.config["scoring_weights"])
+        decision = run_demo.mock_decision(asset, self.config, self.today)
+        audit = run_demo.mock_audit(asset, decision, self.config, self.today)
+        final = run_demo.apply_risk(asset, decision, audit, {"portfolio_value_usd": 50000}, self.config, self.today)
+        self.assertEqual(final["final_decision"], "BLOCKED")
+        self.assertIn("block_if_data_quality_low", final["risk_rules_triggered"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
