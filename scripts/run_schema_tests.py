@@ -2,6 +2,7 @@
 """Tests básicos de contratos para Fase 2 sin dependencias externas."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,6 +83,83 @@ class SchemaContractTests(unittest.TestCase):
         invalid = dict(self.final, final_decision="REAL_BUY")
         errors = validate_schema(invalid, schema)
         self.assertTrue(any("enum" in error for error in errors))
+
+
+class Phase4LLMTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = run_demo.load_config()
+        self.today = "2026-06-27"
+        self.asset = run_demo.score_asset(run_demo.read_json(run_demo.FIXTURE_PATH)[0], self.config["scoring_weights"])
+
+    def _temp_pack_and_log(self, tmp: Path) -> tuple[Path, Path]:
+        pack = {
+            "run_id": "test_run",
+            "date": self.today,
+            "agent": "research",
+            "sections": [{"name": "current_candidates", "content": [{"ticker": self.asset["ticker"], "company": self.asset["company"]}]}],
+        }
+        pack_path = tmp / "context_packs" / "research.json"
+        run_demo.write_json(pack_path, pack)
+        return pack_path, tmp / "llm.jsonl"
+
+    def test_llm_disabled_uses_mock_without_api_key(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp_name:
+            pack_path, log_path = self._temp_pack_and_log(Path(tmp_name))
+            outputs, summary = run_demo.research_with_optional_llm(self.config, self.today, [self.asset], pack_path, log_path)
+        self.assertEqual(summary["mode"], "mock")
+        self.assertEqual(outputs[0]["research_status"], "MOCK_PLACEHOLDER")
+        self.assertFalse(log_path.exists())
+
+    def test_missing_api_key_fails_clearly_when_enabled(self) -> None:
+        config = dict(self.config)
+        config["llm"] = {**run_demo.llm_settings(self.config), "enabled": True, "real_agents": ["research_agent"]}
+        with self.assertRaisesRegex(run_demo.LLMConfigError, "ANTHROPIC_API_KEY"):
+            run_demo.require_api_key(config, "research_agent")
+
+    def test_invalid_llm_response_falls_back_to_mock_and_logs_validation(self) -> None:
+        config = dict(self.config)
+        config["llm"] = {**run_demo.llm_settings(self.config), "enabled": True, "real_agents": ["research_agent"], "max_retries": 0, "fallback_to_mock": True, "block_on_invalid_response": False}
+        def fake_provider(*args, **kwargs):
+            return {"output_text": '{"ticker":"BAD"}', "usage": {"input_tokens": 10, "output_tokens": 3}, "estimated_cost_usd": 0.01}
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp_name:
+            tmp = Path(tmp_name)
+            pack_path, log_path = self._temp_pack_and_log(tmp)
+            import os
+            old = os.environ.get("ANTHROPIC_API_KEY")
+            os.environ["ANTHROPIC_API_KEY"] = "test-key"
+            try:
+                outputs, summary = run_demo.research_with_optional_llm(config, self.today, [self.asset], pack_path, log_path, fake_provider)
+            finally:
+                if old is None:
+                    os.environ.pop("ANTHROPIC_API_KEY", None)
+                else:
+                    os.environ["ANTHROPIC_API_KEY"] = old
+            self.assertEqual(outputs[0]["research_status"], "MOCK_PLACEHOLDER")
+            self.assertEqual(summary["fallbacks"], 1)
+            self.assertIn("llm_call", log_path.read_text(encoding="utf-8"))
+            self.assertIn("valid", log_path.read_text(encoding="utf-8"))
+
+    def test_valid_llm_response_is_schema_validated(self) -> None:
+        config = dict(self.config)
+        config["llm"] = {**run_demo.llm_settings(self.config), "enabled": True, "real_agents": ["research_agent"], "max_retries": 0}
+        valid = run_demo.mock_research(self.asset, self.today)
+        valid["research_status"] = "READY_FOR_FUTURE_LLM"
+        def fake_provider(*args, **kwargs):
+            return {"output_text": json.dumps(valid), "usage": {"input_tokens": 10, "output_tokens": 30}, "estimated_cost_usd": 0.01}
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp_name:
+            pack_path, log_path = self._temp_pack_and_log(Path(tmp_name))
+            import os
+            old = os.environ.get("ANTHROPIC_API_KEY")
+            os.environ["ANTHROPIC_API_KEY"] = "test-key"
+            try:
+                outputs, summary = run_demo.research_with_optional_llm(config, self.today, [self.asset], pack_path, log_path, fake_provider)
+            finally:
+                if old is None:
+                    os.environ.pop("ANTHROPIC_API_KEY", None)
+                else:
+                    os.environ["ANTHROPIC_API_KEY"] = old
+        self.assertEqual(outputs[0]["research_status"], "READY_FOR_FUTURE_LLM")
+        self.assertEqual(summary["calls"], 1)
 
 
 if __name__ == "__main__":

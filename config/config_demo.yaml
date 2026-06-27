@@ -107,6 +107,23 @@ agents:
     model: "claude-sonnet-latest"
     temperature: 0.2
 
+# Capa LLM Fase 4: deshabilitada por default. No contiene credenciales.
+llm:
+  enabled: false
+  real_agents: []  # Para prueba real controlada: ["research_agent"]
+  fallback_to_mock: true
+  block_on_invalid_response: false
+  max_candidates_sent: 3
+  max_retries: 1
+  timeout_seconds: 20
+  max_cost_usd_per_run: 1.00
+  track_token_usage_if_available: true
+  providers:
+    anthropic:
+      api_key_env: "ANTHROPIC_API_KEY"
+    openai:
+      api_key_env: "OPENAI_API_KEY"
+
 outputs:
   save_json: true
   save_markdown: true
