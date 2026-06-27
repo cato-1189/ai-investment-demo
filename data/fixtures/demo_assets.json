@@ -1,0 +1,86 @@
+[
+  {
+    "ticker": "ACME",
+    "company": "Acme Industrial Demo Corp",
+    "country": "US",
+    "market": "US",
+    "sector": "Industrials",
+    "currency": "USD",
+    "price_close": 50.0,
+    "avg_volume_usd": 5000000,
+    "metrics": {
+      "pe_ttm": 10.0,
+      "ev_ebitda": 6.0,
+      "fcf_yield": 0.08,
+      "roe": 0.18,
+      "revenue_growth": 0.12,
+      "net_debt_ebitda": 1.5,
+      "momentum_6m": -0.08,
+      "drawdown_52w": -0.25
+    },
+    "data_quality": "HIGH"
+  },
+  {
+    "ticker": "BRDEMO",
+    "company": "Brasil Energia Demo SA",
+    "country": "BR",
+    "market": "BR",
+    "sector": "Energy",
+    "currency": "BRL",
+    "price_close": 20.0,
+    "avg_volume_usd": 2500000,
+    "metrics": {
+      "pe_ttm": 8.0,
+      "ev_ebitda": 5.5,
+      "fcf_yield": 0.09,
+      "roe": 0.16,
+      "revenue_growth": 0.05,
+      "net_debt_ebitda": 2.0,
+      "momentum_6m": 0.04,
+      "drawdown_52w": -0.12
+    },
+    "data_quality": "MEDIUM"
+  },
+  {
+    "ticker": "RISKY",
+    "company": "Risky Retail Demo Inc",
+    "country": "US",
+    "market": "US",
+    "sector": "Consumer Discretionary",
+    "currency": "USD",
+    "price_close": 12.0,
+    "avg_volume_usd": 300000,
+    "metrics": {
+      "pe_ttm": 4.0,
+      "ev_ebitda": 4.0,
+      "fcf_yield": -0.03,
+      "roe": -0.08,
+      "revenue_growth": -0.15,
+      "net_debt_ebitda": 5.2,
+      "momentum_6m": -0.45,
+      "drawdown_52w": -0.70
+    },
+    "data_quality": "LOW"
+  },
+  {
+    "ticker": "ARDEMO",
+    "company": "Argentina Bancos Demo SA",
+    "country": "AR",
+    "market": "AR",
+    "sector": "Financials",
+    "currency": "ARS",
+    "price_close": 8.0,
+    "avg_volume_usd": 1800000,
+    "metrics": {
+      "pe_ttm": 7.0,
+      "ev_ebitda": 7.5,
+      "fcf_yield": 0.06,
+      "roe": 0.14,
+      "revenue_growth": 0.09,
+      "net_debt_ebitda": 1.0,
+      "momentum_6m": 0.11,
+      "drawdown_52w": -0.20
+    },
+    "data_quality": "MEDIUM"
+  }
+]
