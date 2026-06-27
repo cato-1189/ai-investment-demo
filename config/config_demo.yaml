@@ -66,6 +66,46 @@ market_data:
       requires_api_key: false
       base_url: "https://stooq.com"
 
+performance_tracking:
+  enabled: true
+  ledger_folder: "outputs/performance"
+  benchmark_prices_file: "memory/benchmark_prices.csv"
+  decision_tracking_ledger: "memory/decision_tracking_ledger.jsonl"
+  forward_test_pending: "memory/forward_test_pending.csv"
+  forward_test_results: "memory/forward_test_results.csv"
+  windows_months: [3, 6, 12]
+  benchmarks:
+    SPY:
+      label: "S&P 500 proxy"
+      geography: "US"
+      fixture_price: 550.0
+    QQQ:
+      label: "Nasdaq 100 proxy"
+      geography: "US_TECH"
+      fixture_price: 480.0
+    EWZ:
+      label: "Brasil proxy"
+      geography: "BR"
+      fixture_price: 29.0
+    ARGT:
+      label: "Argentina proxy"
+      geography: "AR"
+      fixture_price: null
+    BIL:
+      label: "cash / T-bill proxy"
+      geography: "CASH"
+      fixture_price: null
+  composite_benchmark:
+    enabled: true
+    default_cash_benchmark: "BIL"
+    country_to_benchmark:
+      US: "SPY"
+      BR: "EWZ"
+      AR: "ARGT"
+    sector_overrides:
+      Technology: "QQQ"
+
+
 portfolio_rules:
   max_positions: 15
   min_positions: 8

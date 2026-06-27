@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fase 5: DEMO con ingesta controlada de datos de cierre."""
+"""Fase 6: seguimiento de performance DEMO, benchmarks y forward-test."""
 from __future__ import annotations
 
 import argparse
@@ -133,7 +133,7 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
     common = {
         "run_id": run_id,
         "date": today,
-        "phase": "FASE_5",
+        "phase": "FASE_6",
         "config_digest": config_digest(config),
         "safety": {"mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False},
     }
@@ -230,7 +230,7 @@ def validate_market_data_safety(config: dict[str, Any]) -> list[str]:
     if settings.get("enabled") and settings.get("mode") != "real":
         errors.append("market_data.enabled=true requiere market_data.mode=real explícito")
     if settings.get("provider") not in {"fixture", "stooq_csv"}:
-        errors.append(f"market_data.provider no soportado en Fase 5: {settings.get('provider')}")
+        errors.append(f"market_data.provider no soportado en Fase 6: {settings.get('provider')}")
     return errors
 
 
@@ -883,6 +883,172 @@ def update_portfolio(portfolio: dict[str, Any], finals: list[dict[str, Any]], as
     return portfolio, trades
 
 
+
+
+def pct_return(current: float | None, previous: float | None) -> float | None:
+    if current is None or previous in {None, 0}:
+        return None
+    return round((current / previous) - 1, 6)
+
+
+def safe_float(value: Any) -> float | None:
+    try:
+        if value in {None, ""}:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def performance_settings(config: dict[str, Any]) -> dict[str, Any]:
+    return config.get("performance_tracking", {})
+
+
+def mark_to_market_portfolio(portfolio: dict[str, Any], assets_by_ticker: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    cash = float(portfolio.get("cash_usd", 0.0))
+    positions = []
+    for pos in portfolio.get("positions", []):
+        updated = dict(pos)
+        asset = assets_by_ticker.get(pos.get("ticker"))
+        if asset and safe_float(asset.get("price_close")) is not None:
+            updated["price_close"] = float(asset["price_close"])
+            updated["market_value_usd"] = round(float(updated.get("shares", 0.0)) * updated["price_close"], 2)
+        updated["price_data_missing"] = not bool(asset and safe_float(asset.get("price_close")) is not None)
+        positions.append(updated)
+    total = round(cash + sum(float(p.get("market_value_usd", 0.0)) for p in positions), 2)
+    for p in positions:
+        p["weight"] = round(float(p.get("market_value_usd", 0.0)) / total, 6) if total else 0.0
+    portfolio["positions"] = positions
+    portfolio["portfolio_value_usd"] = total
+    portfolio["portfolio_metrics"] = {"number_of_positions": len(positions), "cash_weight": round(cash / total, 6) if total else 0.0}
+    return portfolio
+
+
+def portfolio_exposures(portfolio: dict[str, Any]) -> dict[str, Any]:
+    total = float(portfolio.get("portfolio_value_usd", 0.0)) or 0.0
+    buckets = {"country": {}, "sector": {}, "asset": {}}
+    for p in portfolio.get("positions", []):
+        value = float(p.get("market_value_usd", 0.0))
+        weight = round(value / total, 6) if total else 0.0
+        buckets["asset"][p["ticker"]] = weight
+        for key in ["country", "sector"]:
+            name = p.get(key, "Unknown")
+            buckets[key][name] = round(buckets[key].get(name, 0.0) + weight, 6)
+    buckets["asset"]["CASH"] = round(float(portfolio.get("cash_usd", 0.0)) / total, 6) if total else 0.0
+    return buckets
+
+
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def append_csv_rows(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists() and path.stat().st_size > 0
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if not exists:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({f: row.get(f) for f in fields})
+
+
+def benchmark_snapshot(config: dict[str, Any], today: str, assets_by_ticker: dict[str, dict[str, Any]], exposures: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    settings = performance_settings(config)
+    bench_cfg = settings.get("benchmarks", {})
+    history_path = ROOT / settings.get("benchmark_prices_file", "memory/benchmark_prices.csv")
+    prior = {(r.get("ticker")): safe_float(r.get("price")) for r in read_csv_rows(history_path) if r.get("date") < today}
+    rows = []
+    price_by_ticker: dict[str, float] = {}
+    for ticker, cfg in bench_cfg.items():
+        asset = assets_by_ticker.get(ticker)
+        price = safe_float(asset.get("price_close")) if asset else safe_float(cfg.get("fixture_price"))
+        missing = price is None
+        previous = prior.get(ticker)
+        rows.append({"date": today, "ticker": ticker, "label": cfg.get("label"), "price": price, "return_daily": pct_return(price, previous), "missing_data": missing, "source": "market_data_or_fixture_config" if not missing else "missing_not_invented"})
+        if price is not None:
+            price_by_ticker[ticker] = price
+    append_csv_rows(history_path, rows, ["date", "ticker", "label", "price", "return_daily", "missing_data", "source"])
+    return rows, price_by_ticker
+
+
+def composite_weights(config: dict[str, Any], portfolio: dict[str, Any]) -> dict[str, float]:
+    comp = performance_settings(config).get("composite_benchmark", {})
+    mapping = comp.get("country_to_benchmark", {})
+    sector_overrides = comp.get("sector_overrides", {})
+    weights: dict[str, float] = {}
+    total = float(portfolio.get("portfolio_value_usd", 0.0)) or 0.0
+    for p in portfolio.get("positions", []):
+        w = float(p.get("market_value_usd", 0.0)) / total if total else 0.0
+        bench = sector_overrides.get(p.get("sector")) or mapping.get(p.get("country"))
+        if bench:
+            weights[bench] = weights.get(bench, 0.0) + w
+    cash_w = float(portfolio.get("cash_usd", 0.0)) / total if total else 0.0
+    cash_b = comp.get("default_cash_benchmark")
+    if cash_b:
+        weights[cash_b] = weights.get(cash_b, 0.0) + cash_w
+    return {k: round(v, 6) for k, v in weights.items()}
+
+
+def build_performance(run_id: str, today: str, config: dict[str, Any], portfolio: dict[str, Any], assets_by_ticker: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    portfolio = mark_to_market_portfolio(portfolio, assets_by_ticker)
+    exposures = portfolio_exposures(portfolio)
+    rows = read_csv_rows(ROOT / config["context_management"]["memory_files"]["performance_memory"])
+    prev_nav = None
+    if rows:
+        prev_nav = safe_float(rows[-1].get("nav") or rows[-1].get("portfolio_value_usd"))
+    nav = float(portfolio.get("portfolio_value_usd", 0.0))
+    daily = pct_return(nav, prev_nav)
+    initial = float(config["system"]["initial_capital_usd"])
+    bench_rows, _ = benchmark_snapshot(config, today, assets_by_ticker, exposures)
+    comp_w = composite_weights(config, portfolio)
+    comp_ret_parts = []
+    for r in bench_rows:
+        if r["ticker"] in comp_w and r["return_daily"] is not None:
+            comp_ret_parts.append(comp_w[r["ticker"]] * r["return_daily"])
+    comp_daily = round(sum(comp_ret_parts), 6) if comp_ret_parts else None
+    return {"run_id": run_id, "date": today, "nav": round(nav, 2), "cash_usd": portfolio.get("cash_usd"), "positions_count": len(portfolio.get("positions", [])), "daily_return": daily, "cumulative_return": pct_return(nav, initial), "weekly_return": daily, "monthly_return": daily, "since_inception_return": pct_return(nav, initial), "exposures": exposures, "benchmarks": bench_rows, "composite_benchmark": {"weights": comp_w, "daily_return": comp_daily}, "risk_metrics": {"drawdown": min(0.0, pct_return(nav, max([safe_float(r.get('nav') or r.get('portfolio_value_usd')) or nav for r in rows] + [nav])) or 0.0), "volatility_simple": None if daily is None else 0.0}, "missing_benchmark_data": [r["ticker"] for r in bench_rows if r["missing_data"]]}
+
+
+def build_decision_tracking(run_id: str, today: str, decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], assets_by_ticker: dict[str, dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    rows=[]
+    for d,a,f in zip(decisions,audits,finals):
+        rows.append({"run_id":run_id,"date":today,"ticker":d["ticker"],"proposed_action":d["decision"],"final_action":f["final_decision"],"suggested_weight":d["suggested_weight"],"final_weight":f["final_weight"],"reference_price":assets_by_ticker.get(d["ticker"],{}).get("price_close"),"approval_reduction_or_block_reason":f.get("reason_for_blocking") or f.get("reason_for_adjustment"),"mock_audit":a,"risk_rules_applied":f["risk_rules_triggered"],"real_order":False})
+    return rows
+
+
+def forward_pending_rows(tracking: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    rows=[]
+    for row in tracking:
+        for months in performance_settings(config).get("windows_months", [3,6,12]):
+            due = dt.date.fromisoformat(row["date"]) + dt.timedelta(days=30*int(months))
+            rows.append({"run_id":row["run_id"],"decision_date":row["date"],"ticker":row["ticker"],"window_months":months,"due_date":due.isoformat(),"final_action":row["final_action"],"reference_price":row["reference_price"],"status":"PENDING"})
+    return rows
+
+
+def persist_performance_outputs(out_root: Path, config: dict[str, Any], perf: dict[str, Any], tracking: list[dict[str, Any]]) -> None:
+    write_json(out_root / "performance_snapshot.json", perf)
+    ts_fields=["date","run_id","nav","cash_usd","positions_count","daily_return","weekly_return","monthly_return","since_inception_return","composite_benchmark_daily_return"]
+    ts={"date":perf["date"],"run_id":perf["run_id"],"nav":perf["nav"],"cash_usd":perf["cash_usd"],"positions_count":perf["positions_count"],"daily_return":perf["daily_return"],"weekly_return":perf["weekly_return"],"monthly_return":perf["monthly_return"],"since_inception_return":perf["since_inception_return"],"composite_benchmark_daily_return":perf["composite_benchmark"]["daily_return"]}
+    write_csv(out_root / "performance_timeseries.csv", [ts], ts_fields)
+    append_csv_rows(ROOT / config["context_management"]["memory_files"]["performance_memory"], [ts], ts_fields)
+    write_csv(out_root / "benchmark_performance.csv", perf["benchmarks"], ["date","ticker","label","price","return_daily","missing_data","source"])
+    ledger_path=ROOT / performance_settings(config).get("decision_tracking_ledger","memory/decision_tracking_ledger.jsonl")
+    for row in tracking:
+        append_jsonl(out_root / "decision_tracking_ledger.jsonl", row)
+        append_jsonl(ledger_path, row)
+    pending=forward_pending_rows(tracking, config)
+    fields=["run_id","decision_date","ticker","window_months","due_date","final_action","reference_price","status"]
+    write_csv(out_root / "forward_test_pending.csv", pending, fields)
+    append_csv_rows(ROOT / performance_settings(config).get("forward_test_pending","memory/forward_test_pending.csv"), pending, fields)
+    write_csv(out_root / "forward_test_results.csv", [], ["run_id","decision_date","ticker","window_months","due_date","result_return","benchmark_return","relative_return","classification"])
+    lines=[f"# Performance DEMO - {perf['date']}","",f"- NAV: USD {perf['nav']:.2f}",f"- Retorno diario: {perf['daily_return']}",f"- Retorno desde inicio: {perf['since_inception_return']}",f"- Benchmark compuesto: {perf['composite_benchmark']}",f"- Benchmarks sin datos: {', '.join(perf['missing_benchmark_data']) or 'ninguno'}","","## Cómo interpretar","NAV = cash + valor de mercado de posiciones DEMO. Los benchmarks faltantes se muestran como missing y no se inventan."]
+    (out_root / "performance_report.md").write_text("\n".join(lines)+"\n", encoding="utf-8")
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -892,7 +1058,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
             writer.writerow({field: row.get(field) for field in fields})
 
 
-def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any], validation_report: dict[str, Any]) -> None:
+def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any], validation_report: dict[str, Any], performance: dict[str, Any] | None = None) -> None:
     lines = [
         f"# Reporte diario DEMO - {today}",
         "",
@@ -908,6 +1074,14 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
         f"- Cash: USD {portfolio['cash_usd']:.2f}",
         f"- Posiciones: {len(portfolio['positions'])}",
         "",
+        "## Performance DEMO vs benchmarks",
+        f"- NAV: USD {(performance or {}).get('nav', portfolio['portfolio_value_usd']):.2f}",
+        f"- Retorno diario: {(performance or {}).get('daily_return')}",
+        f"- Retorno desde inicio: {(performance or {}).get('since_inception_return')}",
+        f"- Benchmark compuesto diario: {((performance or {}).get('composite_benchmark') or {}).get('daily_return')}",
+        f"- Benchmarks configurados: {', '.join((performance or {}).get('composite_benchmark', {}).get('weights', {}).keys()) if performance else 'SPY, QQQ, EWZ, ARGT, BIL'}",
+        f"- Datos faltantes de benchmark visibles: {', '.join((performance or {}).get('missing_benchmark_data', [])) if performance else '-'}",
+        "",
         "## Decisiones finales",
         "| Ticker | Score | Decisión final | Peso final | Reglas disparadas |",
         "|---|---:|---|---:|---|",
@@ -922,7 +1096,7 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
     else:
         lines.append("| - | Sin operaciones ejecutadas en paper | 0.00 | false |")
     lines += ["", "## Contratos Fase 2", "- Los outputs críticos se validan contra schemas versionados en `schemas/`.", "- Si un contrato crítico falla, la corrida termina con un error explícito antes de persistir el resultado inválido."]
-    lines += ["", "## Limitaciones Fase 5", "- Datos reales solo si config los habilita; fixtures siguen default y fallback.", "- decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
+    lines += ["", "## Limitaciones Fase 6", "- Datos reales solo si config los habilita; fixtures siguen default y fallback.", "- decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -996,7 +1170,7 @@ def build_memory_update(run_id: str, today: str, decisions: list[dict[str, Any]]
     items = []
     for decision, audit, final in zip(decisions, audits, finals):
         items.append({"ticker": decision["ticker"], "fact_type": "demo_decision", "summary": f"{decision['decision']} / {audit['audit_result']} / {final['final_decision']}", "source_run_id": run_id, "verified": False})
-    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 5; datos de mercado pueden ser fixture o proveedor explícito según data_quality_report."}
+    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 6; datos de mercado pueden ser fixture o proveedor explícito según data_quality_report."}
 
 
 def update_external_memory(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], data_quality_report: dict[str, Any]) -> dict[str, Any]:
@@ -1005,16 +1179,11 @@ def update_external_memory(config: dict[str, Any], run_id: str, today: str, memo
     mf = {key: ROOT / rel for key, rel in memory.items()}
 
     write_json(mf["portfolio_state"], portfolio)
-    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 5 ejecutada en DEMO; datos de cierre controlados solo si config los habilita y sin broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
+    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 6 ejecutada en DEMO; datos de cierre controlados solo si config los habilita y sin broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
     append_markdown_section(mf["methodology_state"], f"Revisión operativa {run_id}", ["Se mantiene metodología DEMO determinística basada en fixtures locales.", "Los hechos no verificados se registran explícitamente como no verificados."])
     append_markdown_section(mf["data_quality_memory"], f"Calidad de datos {run_id}", [f"Fuente: {data_quality_report['source']}.", f"Activos revisados: {data_quality_report['total_assets_checked']}.", f"Conteo por calidad: {data_quality_report['quality_counts']}."])
     append_markdown_section(mf["config_change_log"], f"Digest config {run_id}", [f"sha256: {config_digest(config)}.", "No se registraron credenciales ni integraciones operativas."])
-    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 5 valida ingesta controlada de datos; no evalúa performance real."])
-
-    with mf["performance_memory"].open("a", encoding="utf-8") as handle:
-        if not before.get("performance_memory", "").strip():
-            handle.write("date,run_id,portfolio_value_usd,cash_usd,positions,notes\n")
-        handle.write(f"{today},{run_id},{portfolio['portfolio_value_usd']},{portfolio['cash_usd']},{len(portfolio.get('positions', []))},demo_fixture_no_real_performance\n")
+    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 6 valida ingesta controlada de datos; no evalúa performance real."])
 
     for decision, audit, final in zip(decisions, audits, finals):
         item = {"run_id": run_id, "date": today, "ticker": decision["ticker"], "decision_agent_action": decision["decision"], "audit_result": audit["audit_result"], "final_action": final["final_decision"], "reason": final["reason_for_blocking"] or final["reason_for_adjustment"]}
@@ -1041,16 +1210,16 @@ def write_memory_diff_markdown(path: Path, memory_diff: dict[str, Any]) -> None:
 
 
 def build_run_manifest(run_id: str, today: str, config: dict[str, Any], prompts: dict[str, Any], memory: dict[str, str], validation_report: dict[str, Any]) -> dict[str, Any]:
-    return {"run_id": run_id, "date": today, "phase": "FASE_5", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
+    return {"run_id": run_id, "date": today, "phase": "FASE_6", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ejecuta Fase 5 DEMO con datos de cierre controlados, sin broker.")
+    parser = argparse.ArgumentParser(description="Ejecuta Fase 6 DEMO con datos de cierre controlados, sin broker.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
-    run_id = f"{today}_demo_phase5_{stamp}"
+    run_id = f"{today}_demo_phase6_{stamp}"
 
     config = load_config()
     errors = validate_demo_safety(config) + validate_market_data_safety(config) + validate_llm_safety(config)
@@ -1075,6 +1244,9 @@ def main() -> int:
     finals = [apply_risk(asset, decision, audit, portfolio, config, today) for asset, decision, audit in zip(candidates, decisions, audits)]
     assets_by_ticker = {a["ticker"]: a for a in scored}
     portfolio, trades = update_portfolio(portfolio, finals, assets_by_ticker, config, run_id, today)
+    performance = build_performance(run_id, today, config, portfolio, assets_by_ticker)
+    decision_tracking = build_decision_tracking(run_id, today, decisions, audits, finals, assets_by_ticker, config)
+    persist_performance_outputs(out_root, config, performance, decision_tracking)
     quality_provider = "fixture" if data_quality_report["source"] == "local_fixture" else data_quality_report["source"]
     data_quality_report = build_data_quality_report(scored, run_id, today, scored, {"provider": quality_provider, "fetched_at": data_quality_report.get("data_timestamp_utc"), "errors": data_quality_report.get("provider_errors", [])})
     data_quality_report["snapshot_paths"] = snapshot_paths
@@ -1110,13 +1282,14 @@ def main() -> int:
     write_json(out_root / "risk_engine_results.json", finals)
     write_csv(out_root / "simulated_trades.csv", trades, ["run_id", "date", "ticker", "action", "amount_usd", "price", "shares", "real_order"])
     write_json(out_root / "portfolio_snapshot.json", portfolio)
+    write_json(out_root / "performance_snapshot.json", performance)
     write_json(out_root / "memory_update.json", memory_update)
     write_json(out_root / "memory_diff.json", memory_diff)
     write_memory_diff_markdown(out_root / "memory_diff.md", memory_diff)
     write_json(out_root / "context_pack_summary.json", context_pack_summary)
     write_json(out_root / "data_quality_report.json", data_quality_report)
     write_json(out_root / "validation_report.json", validation_report)
-    generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio, validation_report)
+    generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio, validation_report, performance)
 
     portfolio_path = ROOT / config["context_management"]["memory_files"]["portfolio_state"]
     write_json(portfolio_path, portfolio)
@@ -1130,6 +1303,7 @@ def main() -> int:
     print(f"Log: {log_path.relative_to(ROOT)}")
     print(f"Reporte: {(out_root / 'daily_report.md').relative_to(ROOT)}")
     print(f"Memory diff: {(out_root / 'memory_diff.md').relative_to(ROOT)}")
+    print(f"Performance: {(out_root / 'performance_report.md').relative_to(ROOT)}")
     print(f"Context packs: {(out_root / 'context_packs').relative_to(ROOT)}")
     return 0
 
