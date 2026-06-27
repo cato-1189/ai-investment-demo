@@ -28,7 +28,8 @@
       "type": "string",
       "enum": [
         "FASE_2",
-        "FASE_3"
+        "FASE_3",
+        "FASE_4"
       ]
     },
     "mode": {
@@ -44,16 +45,10 @@
       ]
     },
     "external_apis_used": {
-      "type": "boolean",
-      "enum": [
-        false
-      ]
+      "type": "boolean"
     },
     "llms_used": {
-      "type": "boolean",
-      "enum": [
-        false
-      ]
+      "type": "boolean"
     },
     "broker_connected": {
       "type": "boolean",

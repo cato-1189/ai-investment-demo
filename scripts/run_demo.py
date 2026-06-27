@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fase 3: DEMO con memoria externa y context packs, sin LLMs/APIs/broker."""
+"""Fase 4: DEMO con integración LLM controlada, reversible y auditable."""
 from __future__ import annotations
 
 import argparse
@@ -7,9 +7,13 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import os
 import shutil
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from schema_validation import SchemaValidationError, assert_valid, load_schema, validate_schema
 
@@ -129,9 +133,9 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
     common = {
         "run_id": run_id,
         "date": today,
-        "phase": "FASE_3",
+        "phase": "FASE_4",
         "config_digest": config_digest(config),
-        "safety": {"mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": False, "llms_used": False, "broker_connected": False},
+        "safety": {"mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config), "llms_used": llm_enabled(config), "broker_connected": False},
     }
     recent_decisions = tail_jsonl(mf["decision_ledger"], 30)
     recent_audits = tail_jsonl(mf["audit_ledger"], 30)
@@ -191,6 +195,202 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
     return summary
 
 
+
+
+class LLMConfigError(RuntimeError):
+    """Configuración LLM incompleta o insegura para modo real."""
+
+
+class LLMResponseError(RuntimeError):
+    """Respuesta LLM inválida o no parseable."""
+
+
+def llm_settings(config: dict[str, Any]) -> dict[str, Any]:
+    defaults = {
+        "enabled": False,
+        "real_agents": [],
+        "fallback_to_mock": True,
+        "block_on_invalid_response": False,
+        "max_candidates_sent": 3,
+        "max_retries": 1,
+        "timeout_seconds": 20,
+        "max_cost_usd_per_run": 1.0,
+        "providers": {},
+    }
+    return {**defaults, **config.get("llm", {})}
+
+
+def llm_enabled(config: dict[str, Any]) -> bool:
+    return bool(llm_settings(config).get("enabled"))
+
+
+def real_agent_enabled(config: dict[str, Any], agent: str) -> bool:
+    settings = llm_settings(config)
+    return bool(settings.get("enabled") and agent in set(settings.get("real_agents", [])))
+
+
+def validate_llm_safety(config: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    settings = llm_settings(config)
+    real_agents = set(settings.get("real_agents", []))
+    unsupported = real_agents - {"research_agent"}
+    if unsupported:
+        errors.append(f"Fase 4 solo permite research_agent real; no permitido: {sorted(unsupported)}")
+    if settings.get("enabled") and not real_agents:
+        errors.append("llm.enabled=true requiere llm.real_agents con research_agent explícito")
+    if int(settings.get("max_candidates_sent", 0)) < 1:
+        errors.append("llm.max_candidates_sent debe ser >= 1")
+    if float(settings.get("max_cost_usd_per_run", 0)) <= 0:
+        errors.append("llm.max_cost_usd_per_run debe ser > 0")
+    return errors
+
+
+def require_api_key(config: dict[str, Any], agent_key: str) -> tuple[str, str, str]:
+    agent_cfg = config["agents"][agent_key]
+    provider = agent_cfg["provider"]
+    model = agent_cfg.get("model")
+    provider_cfg = llm_settings(config).get("providers", {}).get(provider, {})
+    env_var = provider_cfg.get("api_key_env")
+    if not env_var:
+        raise LLMConfigError(f"Proveedor LLM '{provider}' no tiene api_key_env configurado.")
+    api_key = os.environ.get(env_var)
+    if not api_key:
+        raise LLMConfigError(f"Falta API key requerida para {agent_key}: defina variable de entorno {env_var}.")
+    if not model:
+        raise LLMConfigError(f"{agent_key} no tiene modelo configurado.")
+    return provider, model, api_key
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise LLMResponseError("La respuesta LLM no contiene JSON object.")
+        value = json.loads(text[start : end + 1])
+    if not isinstance(value, dict):
+        raise LLMResponseError("La respuesta LLM debe ser un objeto JSON.")
+    return value
+
+
+def llm_audit_log(log_path: Path, row: dict[str, Any]) -> None:
+    append_jsonl(log_path, {"event": "llm_call", **row})
+
+
+def call_openai_chat(api_key: str, model: str, prompt: str, context_pack: dict[str, Any], timeout: int) -> dict[str, Any]:
+    body = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(context_pack, ensure_ascii=False)},
+        ],
+        "response_format": {"type": "json_object"},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310 - URL fija del proveedor configurado
+        payload = json.loads(response.read().decode("utf-8"))
+    output = payload["choices"][0]["message"]["content"]
+    usage = payload.get("usage", {})
+    return {"output_text": output, "usage": usage, "estimated_cost_usd": None}
+
+
+def call_anthropic_messages(api_key: str, model: str, prompt: str, context_pack: dict[str, Any], timeout: int) -> dict[str, Any]:
+    body = json.dumps({
+        "model": model,
+        "max_tokens": 1500,
+        "system": prompt,
+        "messages": [{"role": "user", "content": json.dumps(context_pack, ensure_ascii=False)}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310 - URL fija del proveedor configurado
+        payload = json.loads(response.read().decode("utf-8"))
+    output = "".join(block.get("text", "") for block in payload.get("content", []) if block.get("type") == "text")
+    usage = payload.get("usage", {})
+    return {"output_text": output, "usage": usage, "estimated_cost_usd": None}
+
+
+def call_llm_provider(provider: str, api_key: str, model: str, prompt: str, context_pack: dict[str, Any], timeout: int) -> dict[str, Any]:
+    if provider == "openai":
+        return call_openai_chat(api_key, model, prompt, context_pack, timeout)
+    if provider == "anthropic":
+        return call_anthropic_messages(api_key, model, prompt, context_pack, timeout)
+    raise LLMConfigError(f"Proveedor LLM no implementado en Fase 4: {provider}")
+
+
+def build_research_pack_for_asset(research_pack: dict[str, Any], asset: dict[str, Any]) -> dict[str, Any]:
+    packed = json.loads(json.dumps(research_pack, ensure_ascii=False))
+    for section in packed.get("sections", []):
+        if section.get("name") == "current_candidates" and isinstance(section.get("content"), list):
+            section["content"] = [row for row in section["content"] if row.get("ticker") == asset["ticker"]]
+        if section.get("name") == "asset_specific_thesis" and isinstance(section.get("content"), list):
+            section["content"] = [row for row in section["content"] if row.get("ticker") == asset["ticker"]]
+    packed["target_ticker"] = asset["ticker"]
+    return packed
+
+
+def research_with_optional_llm(config: dict[str, Any], today: str, candidates: list[dict[str, Any]], context_pack_path: Path, log_path: Path, call_provider: Callable[..., dict[str, Any]] = call_llm_provider) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    settings = llm_settings(config)
+    mock_all = [mock_research(asset, today) for asset in candidates]
+    summary = {"enabled": llm_enabled(config), "agent": "research_agent", "mode": "mock", "calls": 0, "fallbacks": 0, "estimated_cost_usd": 0.0}
+    if not real_agent_enabled(config, "research_agent"):
+        return mock_all, summary
+    provider, model, api_key = require_api_key(config, "research_agent")
+    prompt_path = ROOT / config["agents"]["research_agent"]["prompt_file"]
+    prompt = prompt_path.read_text(encoding="utf-8")
+    research_pack = read_json(context_pack_path, {})
+    max_candidates = min(len(candidates), int(settings["max_candidates_sent"]))
+    outputs = mock_all[:]
+    for idx, asset in enumerate(candidates[:max_candidates]):
+        per_asset_pack = build_research_pack_for_asset(research_pack, asset)
+        attempts = 0
+        last_error = None
+        while attempts <= int(settings["max_retries"]):
+            attempts += 1
+            started = time.time()
+            raw_output = ""
+            validation = {"valid": False, "errors": []}
+            try:
+                result = call_provider(provider, api_key, model, prompt, per_asset_pack, int(settings["timeout_seconds"]))
+                raw_output = result.get("output_text", "")
+                parsed = extract_json_object(raw_output)
+                errors = validate_schema(parsed, load_schema(SCHEMA_DIR / "research_output_schema.json"))
+                validation = {"valid": not errors, "errors": errors}
+                usage = result.get("usage", {})
+                cost = result.get("estimated_cost_usd")
+                if cost is not None:
+                    summary["estimated_cost_usd"] += float(cost)
+                llm_audit_log(log_path, {"run_id": per_asset_pack["run_id"], "agent": "research_agent", "provider": provider, "model": model, "prompt_file": str(prompt_path.relative_to(ROOT)), "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "context_pack": str(context_pack_path.relative_to(ROOT)), "target_ticker": asset["ticker"], "attempt": attempts, "output": raw_output, "validation": validation, "usage": usage, "estimated_cost_usd": cost, "duration_seconds": round(time.time() - started, 3), "error": None})
+                if errors:
+                    raise LLMResponseError("; ".join(errors))
+                outputs[idx] = parsed
+                summary["calls"] += 1
+                break
+            except Exception as exc:  # clear logged failure; fallback/block decided below
+                last_error = str(exc)
+                llm_audit_log(log_path, {"run_id": research_pack.get("run_id"), "agent": "research_agent", "provider": provider, "model": model, "prompt_file": str(prompt_path.relative_to(ROOT)), "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "context_pack": str(context_pack_path.relative_to(ROOT)), "target_ticker": asset["ticker"], "attempt": attempts, "output": raw_output, "validation": validation, "usage": {}, "estimated_cost_usd": None, "duration_seconds": round(time.time() - started, 3), "error": last_error})
+                if attempts > int(settings["max_retries"]):
+                    if settings.get("fallback_to_mock") and not settings.get("block_on_invalid_response"):
+                        summary["fallbacks"] += 1
+                        break
+                    raise LLMResponseError(f"research_agent falló para {asset['ticker']}: {last_error}") from exc
+        if summary["estimated_cost_usd"] > float(settings["max_cost_usd_per_run"]):
+            raise LLMConfigError("Costo máximo por corrida excedido; se bloquea la corrida LLM.")
+    summary["mode"] = "real_with_mock_fallback" if summary["fallbacks"] else "real"
+    return outputs, summary
+
+
 def parse_scalar(value: str) -> Any:
     value = value.strip()
     if value in {"null", "Null", "NULL", "~"}:
@@ -199,6 +399,11 @@ def parse_scalar(value: str) -> Any:
         return True
     if value in {"false", "False", "FALSE"}:
         return False
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [parse_scalar(item.strip()) for item in inner.split(",") if item.strip()]
     if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
         return value[1:-1]
     try:
@@ -574,7 +779,7 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
     else:
         lines.append("| - | Sin operaciones ejecutadas en paper | 0.00 | false |")
     lines += ["", "## Contratos Fase 2", "- Los outputs críticos se validan contra schemas versionados en `schemas/`.", "- Si un contrato crítico falla, la corrida termina con un error explícito antes de persistir el resultado inválido."]
-    lines += ["", "## Limitaciones Fase 2", "- Datos simulados; no representan precios ni fundamentals reales.", "- Research, decisiones y auditorías son mock; no se usaron OpenAI, Claude ni Gemini.", "- No hay broker ni posibilidad de órdenes reales."]
+    lines += ["", "## Limitaciones Fase 4", "- Datos simulados; no representan precios ni fundamentals reales.", "- Solo research_agent puede usar LLM real; decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -616,7 +821,7 @@ def build_memory_update(run_id: str, today: str, decisions: list[dict[str, Any]]
     items = []
     for decision, audit, final in zip(decisions, audits, finals):
         items.append({"ticker": decision["ticker"], "fact_type": "demo_decision", "summary": f"{decision['decision']} / {audit['audit_result']} / {final['final_decision']}", "source_run_id": run_id, "verified": False})
-    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 3; no contiene hechos de mercado verificados."}
+    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 4; no contiene hechos de mercado verificados."}
 
 
 def update_external_memory(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], data_quality_report: dict[str, Any]) -> dict[str, Any]:
@@ -625,11 +830,11 @@ def update_external_memory(config: dict[str, Any], run_id: str, today: str, memo
     mf = {key: ROOT / rel for key, rel in memory.items()}
 
     write_json(mf["portfolio_state"], portfolio)
-    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 3 ejecutada sin LLMs, APIs externas, datos reales ni broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
+    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 4 ejecutada en DEMO; LLM opcional solo para research_agent y sin datos reales ni broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
     append_markdown_section(mf["methodology_state"], f"Revisión operativa {run_id}", ["Se mantiene metodología DEMO determinística basada en fixtures locales.", "Los hechos no verificados se registran explícitamente como no verificados."])
     append_markdown_section(mf["data_quality_memory"], f"Calidad de datos {run_id}", [f"Fuente: {data_quality_report['source']}.", f"Activos revisados: {data_quality_report['total_assets_checked']}.", f"Conteo por calidad: {data_quality_report['quality_counts']}."])
     append_markdown_section(mf["config_change_log"], f"Digest config {run_id}", [f"sha256: {config_digest(config)}.", "No se registraron credenciales ni integraciones operativas."])
-    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 3 valida persistencia de memoria y context packs; no evalúa performance real."])
+    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 4 valida capa LLM controlada; no evalúa performance real."])
 
     with mf["performance_memory"].open("a", encoding="utf-8") as handle:
         if not before.get("performance_memory", "").strip():
@@ -661,19 +866,19 @@ def write_memory_diff_markdown(path: Path, memory_diff: dict[str, Any]) -> None:
 
 
 def build_run_manifest(run_id: str, today: str, config: dict[str, Any], prompts: dict[str, Any], memory: dict[str, str], validation_report: dict[str, Any]) -> dict[str, Any]:
-    return {"run_id": run_id, "date": today, "phase": "FASE_3", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": False, "llms_used": False, "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
+    return {"run_id": run_id, "date": today, "phase": "FASE_4", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ejecuta Fase 3 DEMO con memoria externa y context packs, sin LLM/APIs/broker.")
+    parser = argparse.ArgumentParser(description="Ejecuta Fase 4 DEMO con LLM opcional controlado, sin broker ni datos reales.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
-    run_id = f"{today}_demo_phase3_{stamp}"
+    run_id = f"{today}_demo_phase4_{stamp}"
 
     config = load_config()
-    errors = validate_demo_safety(config)
+    errors = validate_demo_safety(config) + validate_llm_safety(config)
     if errors:
         raise SystemExit("Validación DEMO falló: " + "; ".join(errors))
     prompts = load_prompts(config)
@@ -699,6 +904,10 @@ def main() -> int:
     memory_update = build_memory_update(run_id, today, decisions, audits, finals)
     memory_diff = update_external_memory(config, run_id, today, memory, scored, decisions, audits, finals, portfolio, data_quality_report)
     context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root)
+    research_outputs, llm_summary = research_with_optional_llm(config, today, candidates, out_root / "context_packs" / "research.json", log_path)
+    if llm_summary["enabled"]:
+        context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root)
+    append_jsonl(log_path, {"event": "llm_summary", "run_id": run_id, **llm_summary})
 
     validation_report = {"run_id": run_id, "date": today, "schema_version": "phase2.v1", "results": []}
     validate_output_list("scoring_results", scored, "scoring_output_schema.json", validation_report)
@@ -737,7 +946,7 @@ def main() -> int:
     append_jsonl(log_path, {"event": "run_finished", "run_id": run_id, "outputs": str(out_root.relative_to(ROOT)), "trades": len(trades), "positions": len(portfolio["positions"]), "context_packs": context_pack_summary["folder"]})
 
     print(f"DEMO CONFIRMADA: mode={config['system']['mode']} allow_real_orders={config['system']['allow_real_orders']}")
-    print("No se usaron APIs externas, LLMs ni broker. Todas las operaciones son simuladas.")
+    print("Broker/datos reales no usados. LLM real solo si fue habilitado explícitamente; operaciones siempre simuladas.")
     print(f"Contratos Fase 2 compatibles: {validation_report['status']} ({validation_report['valid_outputs']}/{validation_report['checked_outputs']} outputs válidos)")
     print(f"Run ID: {run_id}")
     print(f"Outputs: {out_root.relative_to(ROOT)}")
