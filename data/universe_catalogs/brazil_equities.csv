@@ -1,0 +1,4 @@
+ticker,name,country,market,exchange,currency,instrument_type,sector,industry,preferred_data_provider,eligible_for_investment,eligible_as_benchmark,min_liquidity_required_usd,analysis_priority,notes
+PETR4.SA,Petrobras PN,BR,B3,B3,BRL,common_stock,Energy,Oil & Gas Integrated,stooq_csv,true,false,1000000,60,Acción local Brasil preparada para broad_market
+VALE3.SA,Vale ON,BR,B3,B3,BRL,common_stock,Materials,Iron Ore,stooq_csv,true,false,1000000,61,Acción local Brasil preparada para broad_market
+ITUB4.SA,Itaú Unibanco PN,BR,B3,B3,BRL,common_stock,Financials,Banks,stooq_csv,true,false,1000000,62,Acción local Brasil preparada para broad_market

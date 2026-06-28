@@ -316,6 +316,23 @@ context_management:
     require_memory_diff_report: true
     require_human_readable_memory_summary: true
 
+# Fase 6C: Universe Builder configurable desde catálogos versionables.
+universe_builder:
+  catalog_folder: "data/universe_catalogs"
+  catalog_files: ["us_equities.csv", "brazil_equities.csv", "argentina_equities.csv", "adrs.csv", "manual_overrides.csv"]
+  allow_benchmarks_in_scoring: false
+  filters:
+    allowed_countries: ["US", "BR", "AR"]
+    allowed_markets: ["US", "NYSE", "NASDAQ", "NYSEARCA", "B3", "BYMA", "BR", "AR"]
+    allowed_instrument_types: ["common_stock", "adr", "cedear"]
+    min_liquidity_usd: 1000000
+    min_price: 1.0
+    min_avg_volume_usd: 1000000
+    min_data_quality: "MEDIUM"
+    manual_exclusions: ["BRZU"]
+    max_assets_for_research: 25
+    max_assets_per_run_broad_market: 50
+
 # Fase 6B: separación formal entre universo invertible, benchmarks y exclusiones.
 allowed_instrument_types:
   - "common_stock"
@@ -493,5 +510,5 @@ universe_modes:
     description: "Universo líquido ampliado EEUU, Brasil y Argentina."
     symbols: ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "JPM", "XOM", "KO", "WMT", "MELI", "YPF", "GGAL", "BMA", "PAM", "VALE", "PBR", "ITUB", "BBD", "ABEV"]
   broad_market:
-    description: "Universo amplio configurable; agregar símbolos aquí y metadatos en investable_universe."
+    description: "Universo amplio desde catálogos versionables; se limita por universe_builder.filters.max_assets_per_run_broad_market."
     symbols: ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "JPM", "XOM", "KO", "WMT", "MELI", "YPF", "GGAL", "BMA", "PAM", "VALE", "PBR", "ITUB", "BBD", "ABEV"]

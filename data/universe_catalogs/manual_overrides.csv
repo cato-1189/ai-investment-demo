@@ -1,0 +1,7 @@
+ticker,name,country,market,exchange,currency,instrument_type,sector,industry,preferred_data_provider,eligible_for_investment,eligible_as_benchmark,min_liquidity_required_usd,analysis_priority,notes
+SPY,SPDR S&P 500 ETF Trust,US,NYSEARCA,NYSEARCA,USD,benchmark,Benchmark,US broad market ETF,fixture,false,true,1000000,900,Benchmark; no scoring por default
+QQQ,Invesco QQQ Trust,US,NASDAQ,NASDAQ,USD,benchmark,Benchmark,US technology ETF,fixture,false,true,1000000,901,Benchmark; no scoring por default
+EWZ,iShares MSCI Brazil ETF,BR,NYSEARCA,NYSEARCA,USD,benchmark,Benchmark,Brazil country ETF,fixture,false,true,1000000,902,Benchmark; no scoring por default
+ARGT,Global X MSCI Argentina ETF,AR,NYSEARCA,NYSEARCA,USD,benchmark,Benchmark,Argentina country ETF,fixture,false,true,1000000,903,Benchmark; no scoring por default
+BIL,SPDR Bloomberg 1-3 Month T-Bill ETF,US,NYSEARCA,NYSEARCA,USD,cash_proxy,Cash,Treasury bill ETF,fixture,false,true,1000000,904,Cash proxy; no scoring por default
+BRZU,Direxion Daily MSCI Brazil Bull 2X Shares,US,NYSEARCA,NYSEARCA,USD,etf,ETF,Leveraged ETF,fixture,false,false,1000000,999,Exclusión manual

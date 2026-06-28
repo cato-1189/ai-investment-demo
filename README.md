@@ -160,3 +160,46 @@ La Fase 5 mantiene:
 ## Para Fase 7
 
 Fase 7 debería definir si se incorpora un proveedor pago/robusto de fundamentals, ampliar normalización multi-mercado, mejorar controles de moneda/FX, decidir si research cualitativo usa datos reales enriquecidos y diseñar revisión humana antes de cualquier paso hacia automatización. Broker, órdenes reales, decision_agent real y audit_agent real siguen fuera de alcance hasta aprobación explícita futura.
+
+## Fase 6C: Universe Builder desde catálogos externos
+
+La Fase 6C agrega una capa **Universe Builder** para ampliar el universo invertible sin hardcodear listas grandes en Python. El modo default sigue siendo `demo_small`, así que la DEMO histórica no cambia.
+
+### Catálogos versionables
+
+Los activos ampliables viven en archivos CSV separados:
+
+```text
+data/universe_catalogs/us_equities.csv
+data/universe_catalogs/brazil_equities.csv
+data/universe_catalogs/argentina_equities.csv
+data/universe_catalogs/adrs.csv
+data/universe_catalogs/manual_overrides.csv
+```
+
+Para agregar una acción, editar el CSV correspondiente y completar como mínimo: `ticker`, `name`, `country`, `market`, `exchange`, `currency`, `instrument_type`, `sector`, `industry`, `preferred_data_provider`, `eligible_for_investment`, `eligible_as_benchmark`, `min_liquidity_required_usd`, `analysis_priority` y `notes`. No hace falta tocar código.
+
+### Cambiar entre demo_small, liquid_core y broad_market
+
+Editar manualmente `config/config_demo.yaml`:
+
+```yaml
+market_data:
+  universe_mode: "demo_small"   # demo_small | liquid_core | broad_market
+```
+
+- `demo_small`: pocos tickers, estable para correr sin credenciales.
+- `liquid_core`: más activos líquidos, pero controlados.
+- `broad_market`: carga desde catálogos y aplica `universe_builder.filters.max_assets_per_run_broad_market` para no forzar análisis masivo si no hay datos suficientes.
+
+### Filtros antes del scoring
+
+`universe_builder.filters` permite controlar países, mercados, tipos de instrumento, liquidez mínima, precio mínimo, volumen mínimo, calidad mínima de datos, exclusiones manuales y límites de research/procesamiento. Un activo que no cumpla esos filtros queda bloqueado antes del scoring.
+
+### Evitar que ETFs benchmark entren al scoring
+
+`SPY`, `QQQ`, `EWZ`, `ARGT` y `BIL` están marcados como `eligible_for_investment: false` y `eligible_as_benchmark: true`. Además, `universe_builder.allow_benchmarks_in_scoring: false` mantiene esos ETFs/proxies fuera del scoring aunque aparezcan por error en un modo de universo. Siguen disponibles solo para comparación de performance.
+
+### Reporte de cobertura del universo
+
+Cada corrida genera `outputs/daily_runs/<YYYY-MM-DD>/<run_id>/universe_coverage_report.json` y también incluye el mismo resumen dentro de `data_quality_report.json` bajo `universe_coverage`. El reporte muestra total cargado, elegibles, bloqueados, sin datos, baja liquidez, sin soporte del proveedor, enviados a scoring y enviados a research.

@@ -1,0 +1,11 @@
+ticker,name,country,market,exchange,currency,instrument_type,sector,industry,preferred_data_provider,eligible_for_investment,eligible_as_benchmark,min_liquidity_required_usd,analysis_priority,notes
+MELI,MercadoLibre Inc.,AR,NASDAQ,NASDAQ,USD,common_stock,Consumer Discretionary,Internet Retail,fixture,true,false,1000000,30,Exposición LatAm/Argentina listada en EEUU
+YPF,YPF Sociedad Anónima ADR,AR,NYSE,NYSE,USD,adr,Energy,Oil & Gas Integrated,fixture,true,false,1000000,31,ADR argentino
+GGAL,Grupo Financiero Galicia ADR,AR,NASDAQ,NASDAQ,USD,adr,Financials,Banks,fixture,true,false,1000000,32,ADR argentino
+BMA,Banco Macro ADR,AR,NYSE,NYSE,USD,adr,Financials,Banks,fixture,true,false,1000000,33,ADR argentino
+PAM,Pampa Energía ADR,AR,NYSE,NYSE,USD,adr,Utilities,Integrated Utilities,fixture,true,false,1000000,34,ADR argentino
+VALE,Vale S.A. ADR,BR,NYSE,NYSE,USD,adr,Materials,Iron Ore,fixture,true,false,1000000,35,ADR brasileño
+PBR,Petrobras ADR,BR,NYSE,NYSE,USD,adr,Energy,Oil & Gas Integrated,fixture,true,false,1000000,36,ADR brasileño
+ITUB,Itaú Unibanco ADR,BR,NYSE,NYSE,USD,adr,Financials,Banks,fixture,true,false,1000000,37,ADR brasileño
+BBD,Banco Bradesco ADR,BR,NYSE,NYSE,USD,adr,Financials,Banks,fixture,true,false,1000000,38,ADR brasileño
+ABEV,Ambev S.A. ADR,BR,NYSE,NYSE,USD,adr,Consumer Staples,Beverages,fixture,true,false,1000000,39,ADR brasileño

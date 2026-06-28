@@ -1,0 +1,11 @@
+ticker,name,country,market,exchange,currency,instrument_type,sector,industry,preferred_data_provider,eligible_for_investment,eligible_as_benchmark,min_liquidity_required_usd,analysis_priority,notes
+AAPL,Apple Inc.,US,NASDAQ,NASDAQ,USD,common_stock,Technology,Consumer Electronics,fixture,true,false,1000000,10,Demo/líquida EEUU
+MSFT,Microsoft Corporation,US,NASDAQ,NASDAQ,USD,common_stock,Technology,Software,fixture,true,false,1000000,11,Demo/líquida EEUU
+NVDA,NVIDIA Corporation,US,NASDAQ,NASDAQ,USD,common_stock,Technology,Semiconductors,fixture,true,false,1000000,20,Liquid core EEUU
+AMZN,Amazon.com Inc.,US,NASDAQ,NASDAQ,USD,common_stock,Consumer Discretionary,Internet Retail,fixture,true,false,1000000,21,Liquid core EEUU
+GOOGL,Alphabet Inc. Class A,US,NASDAQ,NASDAQ,USD,common_stock,Communication Services,Internet Content,fixture,true,false,1000000,22,Liquid core EEUU
+META,Meta Platforms Inc.,US,NASDAQ,NASDAQ,USD,common_stock,Communication Services,Internet Content,fixture,true,false,1000000,23,Liquid core EEUU
+JPM,JPMorgan Chase & Co.,US,NYSE,NYSE,USD,common_stock,Financials,Banks,fixture,true,false,1000000,24,Liquid core EEUU
+XOM,Exxon Mobil Corporation,US,NYSE,NYSE,USD,common_stock,Energy,Oil & Gas Integrated,fixture,true,false,1000000,25,Liquid core EEUU
+KO,The Coca-Cola Company,US,NYSE,NYSE,USD,common_stock,Consumer Staples,Beverages,fixture,true,false,1000000,26,Liquid core EEUU
+WMT,Walmart Inc.,US,NYSE,NYSE,USD,common_stock,Consumer Staples,Discount Stores,fixture,true,false,1000000,27,Liquid core EEUU
