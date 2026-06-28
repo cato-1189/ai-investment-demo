@@ -377,3 +377,47 @@ Antes de pasar a una muestra mayor o a una Fase 11, revisar manualmente:
 - que benchmarks sigan fuera del scoring;
 - que no haya credenciales, broker ni órdenes reales;
 - consistencia entre `real_data_pilot_report.json`, `data_quality_report.json`, `universe_coverage_report.json` y `daily_report.md`.
+
+## Fase 10B: fallback multi-provider y CSV manual controlado
+
+La demo normal sigue usando fixtures por default y no requiere credenciales. El piloto real controlado solo se activa con `--activate-real-data-pilot`; mantiene `DEMO_PAPER_TRADING`, broker desconectado, `allow_real_orders=false`, `real_order=false`, `decision_agent` mock y `audit_agent` mock.
+
+La sección `market_data` de `config/config_demo.yaml` ahora documenta estos parámetros de piloto:
+
+- `provider_priority`: orden de proveedores para precios reales de cierre, por ejemplo `["stooq_csv", "manual_csv"]`.
+- `minimum_real_data_coverage_pct`: cobertura mínima de activos invertibles para considerar PASS.
+- `allow_manual_csv_fallback`: habilita explícitamente el fallback local/manual.
+- `manual_csv_path`: ruta parametrizable, por default `data/manual_market_data/{date}/market_data.csv`.
+- `fail_if_no_real_prices`: fuerza FAIL si ningún activo invertible tiene precio real válido.
+
+### CSV manual
+
+El CSV manual es un fallback controlado para entornos donde el proveedor externo no es accesible. Debe guardarse en:
+
+```text
+data/manual_market_data/<YYYY-MM-DD>/market_data.csv
+```
+
+Columnas mínimas requeridas, separadas por `;` o `,`:
+
+```text
+ticker;date;close;volume;currency;source
+```
+
+Cada fila se valida con las mismas reglas de calidad que un proveedor externo: `close` debe ser numérico, `volume` debe ser numérico, `date` debe estar presente, y se calcula `avg_volume_usd = close * volume`. Si faltan campos o no son parseables, el activo queda con calidad LOW, se bloquea antes de scoring y el error queda visible; no se inventan precios faltantes.
+
+### Estados del piloto
+
+- **PASS**: no hay errores de seguridad/integridad y la cobertura real de activos invertibles alcanza `minimum_real_data_coverage_pct`.
+- **WARNING**: hay datos reales parciales, pero faltan activos o no se alcanza la cobertura mínima.
+- **FAIL**: no hay datos para ningún activo invertible con `fail_if_no_real_prices=true`, aparece broker conectado, aparece `real_order=true`, benchmarks entran al scoring, faltan outputs críticos, se habilitan LLM/agentes reales no permitidos o se detecta una violación de integridad.
+
+El reporte se guarda junto a los outputs diarios como `real_data_pilot_report.json` y `real_data_pilot_report.md`, incluyendo cobertura por proveedor, cobertura total, activos cubiertos/sin datos, benchmarks cubiertos/faltantes, errores por proveedor y si se usó CSV manual.
+
+### Comandos
+
+```bash
+python scripts/run_demo.py --date 2026-06-27
+python scripts/run_e2e_validation.py --date 2026-06-27
+python scripts/run_real_data_pilot.py --date 2026-06-27 --activate-real-data-pilot
+```

@@ -42,7 +42,7 @@ def test_real_pilot_report_security_and_visibility():
             report_path = ROOT / line.split("Reporte JSON: ", 1)[1]
     assert report_path and report_path.exists(), proc.stdout
     report = json.loads(report_path.read_text())
-    assert report["provider"] == "stooq_csv"
+    assert report["provider"] in {"stooq_csv", "multi_provider"}
     assert report["requested_tickers"]
     assert "tickers_without_data" in report
     assert report["safety"]["broker_connected"] is False

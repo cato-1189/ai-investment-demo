@@ -6,3 +6,6 @@ memory/
 # Python cache
 __pycache__/
 *.py[cod]
+# Market data runtime/manual local inputs
+data/snapshots/
+data/manual_market_data/
