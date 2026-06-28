@@ -486,7 +486,8 @@ def market_data_settings(config: dict[str, Any]) -> dict[str, Any]:
     }
     settings = {**defaults, **config.get("market_data", {})}
     if not settings.get("universe"):
-        settings["universe"] = resolve_universes(config)["investable"]
+        universes = resolve_universes(config)
+        settings["universe"] = universes["investable"] + universes["benchmarks"]
     if settings.get("mode") == "fixture":
         settings["enabled"] = False
     return settings
@@ -1685,6 +1686,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Ejecuta Fase 8 DEMO con forward-test y post-mortem, sin broker.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
     parser.add_argument("--universe-symbols", default=None, help="Lista CSV opcional para validaciones reproducibles; no modifica config_demo.yaml")
+    parser.add_argument("--real-data-pilot", action="store_true", help="Activa explícitamente piloto controlado con stooq_csv; paper trading, sin broker y sin órdenes reales.")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
@@ -1693,8 +1695,15 @@ def main() -> int:
     config = load_config()
     if args.universe_symbols:
         symbols = [item.strip().upper() for item in args.universe_symbols.split(",") if item.strip()]
-        config["universe_modes"] = {**config.get("universe_modes", {}), "e2e_validation": {"description": "Muestra temporal Fase 9; no persistida en config_demo.yaml.", "symbols": symbols}}
-        config["market_data"] = {**config.get("market_data", {}), "universe_mode": "e2e_validation", "universe": []}
+        mode_name = "real_data_pilot" if args.real_data_pilot else "e2e_validation"
+        description = "Muestra temporal Fase 10 con datos reales al cierre; no persistida en config_demo.yaml." if args.real_data_pilot else "Muestra temporal Fase 9; no persistida en config_demo.yaml."
+        config["universe_modes"] = {**config.get("universe_modes", {}), mode_name: {"description": description, "symbols": symbols}}
+        config["market_data"] = {**config.get("market_data", {}), "universe_mode": mode_name, "universe": []}
+    if args.real_data_pilot:
+        if not args.universe_symbols:
+            raise SystemExit("--real-data-pilot requiere --universe-symbols explícito; no se amplía el universo automáticamente.")
+        config["market_data"] = {**config.get("market_data", {}), "mode": "real", "enabled": True, "provider": "stooq_csv", "fallback_to_fixture": False, "universe": []}
+        config["llm"] = {**config.get("llm", {}), "enabled": False, "real_agents": []}
     errors = validate_demo_safety(config) + validate_market_data_safety(config) + validate_llm_safety(config)
     if errors:
         raise SystemExit("Validación DEMO falló: " + "; ".join(errors))
@@ -1720,12 +1729,13 @@ def main() -> int:
     decisions = [mock_decision(asset, config, today) for asset in candidates]
     audits = [mock_audit(asset, decision, config, today) for asset, decision in zip(candidates, decisions)]
     finals = [apply_risk(asset, decision, audit, portfolio, config, today) for asset, decision, audit in zip(candidates, decisions, audits)]
-    assets_by_ticker = {a["ticker"]: a for a in scored}
-    portfolio, trades = update_portfolio(portfolio, finals, assets_by_ticker, config, run_id, today)
-    performance = build_performance(run_id, today, config, portfolio, assets_by_ticker)
-    decision_tracking = build_decision_tracking(run_id, today, decisions, audits, finals, assets_by_ticker, config)
+    scoring_assets_by_ticker = {a["ticker"]: a for a in scored}
+    all_assets_by_ticker = {a["ticker"]: a for a in assets}
+    portfolio, trades = update_portfolio(portfolio, finals, scoring_assets_by_ticker, config, run_id, today)
+    performance = build_performance(run_id, today, config, portfolio, all_assets_by_ticker)
+    decision_tracking = build_decision_tracking(run_id, today, decisions, audits, finals, scoring_assets_by_ticker, config)
     persist_performance_outputs(out_root, config, performance, decision_tracking)
-    forward_test = evaluate_forward_tests(run_id, today, config, assets_by_ticker, performance)
+    forward_test = evaluate_forward_tests(run_id, today, config, all_assets_by_ticker, performance)
     forward_fields = ["evaluation_run_id","source_run_id","decision_date","ticker","window_months","due_date","final_action","initial_price","final_price","benchmark_used","benchmark_initial_price","benchmark_final_price","absolute_return","benchmark_return","relative_return","status","explanation"]
     write_csv(out_root / "forward_test_results.csv", forward_test["rows"], forward_fields)
     write_json(out_root / "forward_test_summary.json", {"date": today, "status": forward_test["status"], "metrics": forward_test["metrics"]})

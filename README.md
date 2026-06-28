@@ -290,3 +290,90 @@ La opción interna `--universe-symbols` existe para validaciones reproducibles y
 ### Para Fase 10
 
 Fase 10 debería enfocarse en definir el piloto controlado con datos reales: proveedor de datos robusto, criterios de calidad más estrictos, manejo de moneda/FX, revisión humana obligatoria antes de cualquier automatización y controles adicionales antes de considerar cualquier integración operativa. Broker y órdenes reales deben seguir fuera de alcance salvo aprobación explícita futura.
+
+## Fase 10: piloto controlado con datos reales al cierre
+
+La Fase 10 agrega un piloto pequeño con datos reales de cierre, pero **sigue siendo DEMO / paper trading**. No conecta broker, no envía órdenes reales, no habilita `decision_agent` real y no habilita `audit_agent` real.
+
+### Demo normal (default con fixture)
+
+```bash
+python scripts/run_demo.py --date 2026-06-27
+```
+
+Esta corrida no requiere credenciales ni APIs externas. `config/config_demo.yaml` conserva `market_data.mode: fixture` y `market_data.enabled: false` por default.
+
+### Validación end-to-end de Fase 9
+
+```bash
+python scripts/run_e2e_validation.py --date 2026-06-27
+```
+
+La validación E2E sigue usando fixture/mock por default y verifica el flujo completo sin broker ni órdenes reales.
+
+### Piloto con datos reales de Fase 10
+
+El piloto real requiere activación explícita:
+
+```bash
+python scripts/run_real_data_pilot.py --date 2026-06-27 --activate-real-data-pilot
+```
+
+El wrapper llama internamente a `scripts/run_demo.py` con `--real-data-pilot`, `market_data.mode=real`, `market_data.enabled=true`, proveedor `stooq_csv` y una muestra cerrada. No modifica automáticamente `config/config_demo.yaml`.
+
+### Muestra usada
+
+Activos invertibles solicitados:
+
+- EEUU: `AAPL`, `MSFT`, `NVDA`.
+- Argentina / ADRs: `YPF`, `GGAL`, `MELI`.
+- Brasil / ADRs: `VALE`, `PBR`, `ITUB`.
+
+Benchmarks solicitados, solo para comparación y performance:
+
+- `SPY`, `QQQ`, `EWZ`, `ARGT`, `BIL`.
+
+Los benchmarks no entran al scoring. Si aparecen como activos excluidos, es esperado: significa que fueron reconocidos como benchmarks/no invertibles.
+
+### Reportes del piloto
+
+Cada corrida guarda los reportes en la carpeta diaria de outputs, por ejemplo:
+
+```text
+outputs/daily_runs/<fecha>/<run_id>/real_data_pilot_report.json
+outputs/daily_runs/<fecha>/<run_id>/real_data_pilot_report.md
+```
+
+El reporte muestra:
+
+- tickers solicitados;
+- tickers con datos reales disponibles;
+- tickers sin datos o con datos insuficientes;
+- tickers bloqueados antes de scoring;
+- benchmarks disponibles y faltantes;
+- activos enviados a scoring;
+- activos excluidos del scoring;
+- si el flujo completo terminó;
+- warnings y errores;
+- confirmación de `broker_connected=false`, `allow_real_orders=false` y `real_order=false`.
+
+### Cómo interpretar cobertura, WARNING y FAIL
+
+- **PASS**: la muestra tuvo cobertura suficiente y todas las validaciones de seguridad pasaron.
+- **WARNING**: el flujo terminó, pero faltaron datos reales o hubo activos bloqueados. Esto es aceptable en Fase 10 siempre que los faltantes queden visibles y no se inventen datos.
+- **FAIL**: falló una regla de seguridad o integridad, por ejemplo broker conectado, `real_order=true`, benchmarks dentro del scoring, outputs obligatorios faltantes o agentes reales no permitidos.
+
+### Por qué sigue siendo paper trading
+
+El sistema mantiene `system.mode=DEMO_PAPER_TRADING`, `system.allow_real_orders=false`, `broker_connected=false` en el manifiesto de corrida y todas las filas de `simulated_trades.csv` tienen `real_order=false`. Las operaciones son simuladas y solo actualizan el portfolio DEMO local.
+
+### Qué revisar antes de ampliar universo
+
+Antes de pasar a una muestra mayor o a una Fase 11, revisar manualmente:
+
+- cobertura real por ticker y benchmark;
+- tickers bloqueados por datos insuficientes o liquidez;
+- errores del proveedor `stooq_csv`;
+- que benchmarks sigan fuera del scoring;
+- que no haya credenciales, broker ni órdenes reales;
+- consistencia entre `real_data_pilot_report.json`, `data_quality_report.json`, `universe_coverage_report.json` y `daily_report.md`.
