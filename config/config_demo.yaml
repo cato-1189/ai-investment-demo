@@ -32,9 +32,17 @@ markets:
 market_data:
   mode: "fixture"        # fixture | real
   enabled: false          # debe ser true junto con mode=real para usar proveedor externo
-  provider: "fixture"    # fixture | stooq_csv | manual_csv
-  provider_priority: ["stooq_csv", "manual_csv"]
+  provider: "fixture"    # fixture | stooq_csv | manual_csv | yfinance. Si provider=yfinance, se usa yfinance o falla claro.
+  financial_data_providers: ["fixture", "stooq_csv", "manual_csv", "yfinance"]
+  provider_priority: ["stooq_csv", "manual_csv"]  # prioridad solo para multi-provider cuando provider no fuerza yfinance/manual_csv
+  enable_yfinance_provider: false
   minimum_real_data_coverage_pct: 0.60
+  minimum_price_coverage_pct: 0.60
+  minimum_fundamentals_coverage_pct: 0.0
+  minimum_ratios_coverage_pct: 0.0
+  minimum_metadata_coverage_pct: null
+  required_fields_for_scoring: ["price_close", "avg_volume_usd", "metrics"]
+  fail_if_required_financial_fields_missing: true
   allow_manual_csv_fallback: false
   manual_csv_path: "data/manual_market_data/{date}/market_data.csv"
   fail_if_no_real_prices: true
@@ -49,6 +57,12 @@ market_data:
     stooq_csv:
       requires_api_key: false
       base_url: "https://stooq.com"
+    manual_csv:
+      requires_api_key: false
+    yfinance:
+      requires_api_key: false
+      official_provider: false
+      enabled_by_default: false
 
 # Fase 11B: política de data readiness para preflight del controlled pilot.
 # No habilita broker, órdenes reales, GitHub Actions ni cron.

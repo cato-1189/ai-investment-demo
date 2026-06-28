@@ -45,7 +45,15 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
     normalized = read_json(out_root / "snapshots" / "normalized_market_data.json", [])
     scored = {row.get("ticker") for row in scoring}
     normalized_by_ticker = {row.get("ticker"): row for row in normalized}
-    available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and not normalized_by_ticker[t].get("missing_fields") and normalized_by_ticker[t].get("data_source") != "real_provider_failed")
+    def category_available(row, category):
+        data = row.get(category) or {}
+        return bool(data) and any(not field.get("is_missing") for field in data.values() if isinstance(field, dict))
+    price_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "price_data"))
+    fundamentals_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "fundamentals_data"))
+    ratios_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "ratios_data"))
+    metadata_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "metadata_data"))
+    ready_for_scoring = sorted(t for t in INVESTABLE if t in scored)
+    available = price_available
     provider_by_ticker = {t: normalized_by_ticker[t].get("provider") for t in available if t in normalized_by_ticker}
     coverage_by_provider = {}
     for ticker, provider in provider_by_ticker.items():
@@ -100,6 +108,11 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
         "requested_tickers": INVESTABLE,
         "requested_benchmarks": BENCHMARKS,
         "tickers_with_real_data_available": available,
+        "price_available": price_available,
+        "fundamentals_available": fundamentals_available,
+        "ratios_available": ratios_available,
+        "metadata_available": metadata_available,
+        "ready_for_scoring": ready_for_scoring,
         "tickers_without_data": missing,
         "tickers_blocked": blocked,
         "benchmarks_available": bench_avail,

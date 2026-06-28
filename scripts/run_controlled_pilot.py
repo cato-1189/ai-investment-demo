@@ -225,7 +225,7 @@ def build_preflight(config: dict[str, Any], date: str, *, require_manual_csv: bo
     add_check(checks, "decision_audit_real_disabled", "PASS" if not ({"decision_agent", "audit_agent"} & agents) else "FAIL", "decision_agent y audit_agent reales deben estar deshabilitados.", real_agents=sorted(agents))
     llm_ok = not llm.get("enabled") or allow_real_llm
     add_check(checks, "llm_real_disabled", "PASS" if llm_ok else "FAIL", "LLM real deshabilitado salvo autorización explícita.", llm_enabled=bool(llm.get("enabled")), allow_real_llm=allow_real_llm)
-    provider_ok = bool(settings.get("provider")) and settings.get("provider") in {"fixture", "stooq_csv", "manual_csv"}
+    provider_ok = bool(settings.get("provider")) and settings.get("provider") in {"fixture", "stooq_csv", "manual_csv", "yfinance"}
     add_check(checks, "data_provider_configured", "PASS" if provider_ok else "FAIL", "Proveedor de datos configurado y soportado.", provider=settings.get("provider"), provider_priority=settings.get("provider_priority"))
 
     data_readiness = build_data_readiness(config, date, require_manual_csv=require_manual_csv, probe_data_provider=probe_data_provider)
@@ -286,6 +286,26 @@ def build_control_report(preflight: dict[str, Any], pilot_proc: subprocess.Compl
             warnings.append("El piloto terminó con WARNING.")
         else:
             errors.append(f"Piloto terminó con código {pilot_proc.returncode}.")
+    # Fase 12A: validar cobertura financiera efectiva leyendo el reporte real.
+    if pilot_report:
+        cfg = run_demo.load_config()
+        settings = run_demo.market_data_settings(cfg)
+        coverage_checks = [
+            ("price", "price_available", "minimum_price_coverage_pct"),
+            ("fundamentals", "fundamentals_available", "minimum_fundamentals_coverage_pct"),
+            ("ratios", "ratios_available", "minimum_ratios_coverage_pct"),
+            ("metadata", "metadata_available", "minimum_metadata_coverage_pct"),
+        ]
+        warning_or_fail = data_policy(cfg).get("partial_coverage_below_threshold_status", "WARNING")
+        for label, field, threshold_key in coverage_checks:
+            threshold = settings.get(threshold_key)
+            if threshold is None:
+                continue
+            observed = len(pilot_report.get(field, []) or []) / len(INVESTABLE) if INVESTABLE else 0.0
+            if observed < float(threshold):
+                msg = f"Cobertura {label} efectiva {observed:.0%} menor al mínimo {float(threshold):.0%}."
+                (errors if warning_or_fail == "FAIL" else warnings).append(msg)
+
     status = "BLOCKED" if not started else ("FAIL" if errors and not (pilot_report and pilot_report.get("status") == "WARNING" and not [e for e in errors if 'código' in e]) else (pilot_report or {}).get("status", "PASS"))
     outputs = []
     if pilot_report_path:
@@ -298,7 +318,7 @@ def build_control_report(preflight: dict[str, Any], pilot_proc: subprocess.Compl
         "pilot_returncode": pilot_proc.returncode if pilot_proc else None,
         "pilot_status": (pilot_report or {}).get("status") if pilot_report else None,
         "data_readiness": preflight.get("data_readiness"),
-        "data_coverage": {"preflight_data_readiness_status": preflight.get("data_readiness_status"), "real_data_coverage_pct": (pilot_report or {}).get("real_data_coverage_pct"), "coverage_by_provider": (pilot_report or {}).get("coverage_by_provider"), "tickers_without_data": (pilot_report or {}).get("tickers_without_data"), "benchmarks_missing": (pilot_report or {}).get("benchmarks_missing")},
+        "data_coverage": {"preflight_data_readiness_status": preflight.get("data_readiness_status"), "real_data_coverage_pct": (pilot_report or {}).get("real_data_coverage_pct"), "price_available": (pilot_report or {}).get("price_available"), "fundamentals_available": (pilot_report or {}).get("fundamentals_available"), "ratios_available": (pilot_report or {}).get("ratios_available"), "metadata_available": (pilot_report or {}).get("metadata_available"), "ready_for_scoring": (pilot_report or {}).get("ready_for_scoring"), "coverage_by_provider": (pilot_report or {}).get("coverage_by_provider"), "tickers_without_data": (pilot_report or {}).get("tickers_without_data"), "benchmarks_missing": (pilot_report or {}).get("benchmarks_missing")},
         "errors": errors,
         "warnings": warnings,
         "outputs_generated": outputs,

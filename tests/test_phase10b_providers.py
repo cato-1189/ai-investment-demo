@@ -77,3 +77,63 @@ def test_real_pilot_partial_manual_csv_warning_and_safety():
 def test_zero_coverage_fail_when_required(monkeypatch):
     report = run_demo.build_data_quality_report([], "run", "2026-06-27", [], {"provider": "multi_provider", "errors": [{"error": "none"}]})
     assert report["complete_assets"] == []
+
+
+def test_yfinance_missing_package_allows_manual_fallback(monkeypatch, tmp_path):
+    date = "2026-06-27"
+    path = tmp_path / "market_data.csv"
+    path.write_text("ticker;date;close;volume;currency;source\nAAPL;2026-06-26;200;1000000;USD;manual_test\n", encoding="utf-8")
+
+    def fake_yfinance(universe, today, settings):
+        return {"provider": "yfinance", "as_of_date": today, "fetched_at": "now", "assets": [], "errors": [{"provider": "yfinance", "error": "yfinance no instalado"}]}
+
+    monkeypatch.setattr(run_demo, "fetch_yfinance", fake_yfinance)
+    payload = run_demo.fetch_real_multi_provider([{"ticker": "AAPL"}], date, {"provider": "stooq_csv", "provider_priority": ["yfinance", "manual_csv"], "enable_yfinance_provider": True, "allow_manual_csv_fallback": True, "manual_csv_path": str(path)})
+    assert payload["coverage_by_provider"] == {"yfinance": [], "manual_csv": ["AAPL"]}
+    assert any(e["provider"] == "yfinance" for e in payload["errors"])
+
+
+def test_missing_value_helper_handles_nan_na_and_empty_values():
+    assert run_demo.is_missing_value(None)
+    assert run_demo.is_missing_value(float("nan"))
+    assert run_demo.is_missing_value("")
+    assert run_demo.is_missing_value("N/A")
+    assert run_demo.is_missing_value("N/D")
+    assert run_demo.is_missing_value([])
+    assert run_demo.is_missing_value({})
+
+
+def test_fundamentals_and_ratios_minimums_block_scoring_but_metadata_optional():
+    asset = {"ticker": "AAPL", "price_close": 200, "avg_volume_usd": 1_000_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": [], "price_data": {"price_close": {"value": 200, "is_missing": False}}, "fundamentals_data": {"totalRevenue": {"value": None, "is_missing": True}}, "ratios_data": {"pe_ttm": {"value": 20, "is_missing": False}}, "metadata_data": {}}
+    cfg = {"market_data": {"minimum_price_coverage_pct": 0.5, "minimum_fundamentals_coverage_pct": 1.0, "minimum_ratios_coverage_pct": 1.0, "minimum_metadata_coverage_pct": None}}
+    assert not run_demo.has_sufficient_data_for_scoring(asset, cfg)
+    cfg["market_data"]["minimum_fundamentals_coverage_pct"] = 0.0
+    assert run_demo.has_sufficient_data_for_scoring(asset, cfg)
+
+
+def test_data_quality_report_uses_full_universe_not_only_scored():
+    assets = [
+        {"ticker": "AAPL", "price_close": 200, "avg_volume_usd": 1_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": [], "estimated_fields": []},
+        {"ticker": "MSFT", "data_quality": "LOW", "missing_fields": ["price_close"], "estimated_fields": []},
+        {"ticker": "SPY", "data_quality": "LOW", "missing_fields": ["price_close"], "estimated_fields": []},
+    ]
+    report = run_demo.build_data_quality_report([assets[0]], "run", "2026-06-27", assets, {"provider": "multi_provider"})
+    assert report["total_assets_checked"] == 3
+    assert "MSFT" in report["blocked_assets"]
+    assert "SPY" in report["blocked_assets"]
+
+
+def test_benchmarks_are_filtered_out_of_scoring():
+    cfg = run_demo.load_config()
+    universes = {"investable": [{"ticker": "AAPL"}], "benchmarks": [{"ticker": "SPY"}], "excluded": [], "filters": {"min_price": 1, "min_avg_volume_usd": 1, "min_data_quality": "MEDIUM"}}
+    assets = [{"ticker": "AAPL", "price_close": 200, "avg_volume_usd": 1_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": []}, {"ticker": "SPY", "price_close": 500, "avg_volume_usd": 1_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": []}]
+    scoring, pre = run_demo.filter_assets_for_scoring(assets, universes, cfg)
+    assert [a["ticker"] for a in scoring] == ["AAPL"]
+    assert pre["blocked_before_scoring"][0]["reason"] == "benchmark_not_investable"
+
+
+def test_fetch_yfinance_reports_module_not_found_when_not_installed():
+    payload = run_demo.fetch_yfinance([{"ticker": "AAPL"}], "2026-06-27", {})
+    assert payload["provider"] == "yfinance"
+    assert payload["assets"] == []
+    assert payload["errors"][0]["exception"] == "ModuleNotFoundError"
