@@ -40,16 +40,62 @@ def test_preflight_fail_without_required_manual_csv(tmp_path):
     cfg["market_data"] = {**cfg["market_data"], "manual_csv_path": str(tmp_path / "missing.csv")}
     report = controlled.build_preflight(cfg, "2026-06-27", require_manual_csv=True)
     assert report["status"] == "FAIL"
-    assert any(check["name"] == "manual_csv_present" for check in report["errors"])
+    assert report["data_readiness_status"] == "FAIL"
+    assert any(check["name"] == "data_manual_csv_required_present" for check in report["errors"])
 
 
 def test_preflight_warning_for_missing_benchmark():
     cfg = config_copy()
+    csv_path = write_manual(Path("/tmp/phase11b_benchmark_warning.csv"))
+    cfg["market_data"] = {**cfg["market_data"], "manual_csv_path": str(csv_path)}
     cfg["benchmark_universe"] = [b for b in cfg["benchmark_universe"] if b["ticker"] != "BIL"]
     report = controlled.build_preflight(cfg, "2026-06-27")
     assert report["status"] == "WARNING"
     warning = next(check for check in report["warnings"] if check["name"] == "benchmarks_present")
     assert "BIL" in warning["missing"]
+
+
+def test_preflight_warning_with_partial_coverage_allowed(tmp_path):
+    cfg = config_copy()
+    csv_path = write_manual(tmp_path / "market_data.csv", tickers=controlled.INVESTABLE[:3])
+    cfg["market_data"] = {**cfg["market_data"], "manual_csv_path": str(csv_path)}
+    cfg["controlled_pilot_data_policy"] = {**cfg["controlled_pilot_data_policy"], "partial_coverage_below_threshold_status": "WARNING"}
+    report = controlled.build_preflight(cfg, "2026-06-27")
+    assert report["data_readiness_status"] == "WARNING"
+    assert report["data_readiness"]["investable_coverage"]["covered_tickers"] == controlled.INVESTABLE[:3]
+
+
+def test_preflight_fail_with_zero_coverage(tmp_path):
+    cfg = config_copy()
+    csv_path = write_manual(tmp_path / "market_data.csv", tickers=["ZZZZ"])
+    cfg["market_data"] = {**cfg["market_data"], "manual_csv_path": str(csv_path)}
+    report = controlled.build_preflight(cfg, "2026-06-27")
+    assert report["data_readiness_status"] == "FAIL"
+    assert any(check["name"] == "data_investable_coverage" for check in report["errors"])
+
+
+def test_provider_probe_records_403_or_timeout(monkeypatch):
+    cfg = config_copy()
+
+    def fake_probe(config, date, tickers):
+        return {"provider": "stooq_csv", "tested_tickers": tickers, "covered_tickers": [], "missing_tickers": tickers, "provider_probe_errors": [{"provider": "stooq_csv", "error": "Tunnel connection failed: 403 Forbidden"}, {"provider": "stooq_csv", "error": "timed out"}]}
+
+    monkeypatch.setattr(controlled, "provider_probe", fake_probe)
+    report = controlled.build_preflight(cfg, "2026-06-27", probe_data_provider=True)
+    errors = report["data_readiness"]["provider_probe_errors"]
+    assert "403 Forbidden" in json.dumps(errors)
+    assert "timed out" in json.dumps(errors)
+
+
+def test_missing_benchmarks_fail_when_required(tmp_path):
+    cfg = config_copy()
+    csv_path = write_manual(tmp_path / "market_data.csv")
+    cfg["market_data"] = {**cfg["market_data"], "manual_csv_path": str(csv_path)}
+    cfg["controlled_pilot_data_policy"] = {**cfg["controlled_pilot_data_policy"], "required_benchmarks_policy": "required"}
+    cfg["benchmark_universe"] = [b for b in cfg["benchmark_universe"] if b["ticker"] != "BIL"]
+    report = controlled.build_preflight(cfg, "2026-06-27")
+    assert report["status"] == "FAIL"
+    assert any(check["name"] == "data_benchmarks_coverage" for check in report["errors"])
 
 
 def test_fail_preflight_does_not_execute_pilot():

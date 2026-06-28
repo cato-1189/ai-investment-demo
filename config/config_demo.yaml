@@ -50,6 +50,15 @@ market_data:
       requires_api_key: false
       base_url: "https://stooq.com"
 
+# Fase 11B: política de data readiness para preflight del controlled pilot.
+# No habilita broker, órdenes reales, GitHub Actions ni cron.
+controlled_pilot_data_policy:
+  require_manual_csv_for_controlled_pilot: false
+  allow_online_provider_probe: false
+  minimum_preflight_data_coverage_pct: 0.60
+  partial_coverage_below_threshold_status: "WARNING"  # WARNING | FAIL
+  required_benchmarks_policy: "warning"  # required | warning | ignore
+
 performance_tracking:
   enabled: true
   ledger_folder: "outputs/performance"
