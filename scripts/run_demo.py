@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fase 7: forward-test, post-mortem y aprendizaje metodológico DEMO."""
+"""Fase 8: revisión humana y versionado metodológico DEMO."""
 from __future__ import annotations
 
 import argparse
@@ -127,13 +127,13 @@ def validate_context_pack_limits(pack: dict[str, Any], config: dict[str, Any], a
     return pack["context_limits"]
 
 
-def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], research: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], memory_diff: dict[str, Any], out_root: Path) -> dict[str, Any]:
+def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], research: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], memory_diff: dict[str, Any], out_root: Path, human_review: dict[str, Any] | None = None) -> dict[str, Any]:
     candidates = [a["ticker"] for a in scored[: config["candidate_filters"]["max_candidates_for_decision"]]]
     mf = {k: ROOT / v for k, v in memory.items()}
     common = {
         "run_id": run_id,
         "date": today,
-        "phase": "FASE_7",
+        "phase": "FASE_8",
         "config_digest": config_digest(config),
         "safety": {"mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False},
     }
@@ -184,6 +184,7 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
             {"name": "forward_test_results_recent", "content": fwd},
             {"name": "universe_coverage", "content": coverage},
             {"name": "postmortem_lessons", "content": postmortem_excerpt},
+            {"name": "human_review", "content": human_review or {}},
         ],
         "learning_postmortem": [
             {"name": "decisions", "content": decisions},
@@ -192,6 +193,7 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
             {"name": "memory_diff", "content": memory_diff["changes"]},
             {"name": "forward_test_results_recent", "content": fwd},
             {"name": "postmortem_lessons", "content": postmortem_excerpt},
+            {"name": "human_review", "content": human_review or {}},
         ],
     }
     pack_dir = out_root / "context_packs"
@@ -207,6 +209,100 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
 
 
 
+
+
+def methodology_review_files(config: dict[str, Any]) -> dict[str, Path]:
+    files = config["context_management"].get("human_review_files", {})
+    return {
+        "queue": ROOT / files.get("queue", "memory/human_review_queue.jsonl"),
+        "decisions": ROOT / files.get("decisions", "memory/human_review_decisions.jsonl"),
+        "versions": ROOT / files.get("versions", "memory/methodology_versions.jsonl"),
+    }
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return tail_jsonl(path, 1_000_000)
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def current_methodology_version(config: dict[str, Any]) -> str:
+    versions = read_jsonl(methodology_review_files(config)["versions"])
+    if versions:
+        return str(versions[-1].get("methodology_version", "METHODOLOGY-000"))
+    return "METHODOLOGY-000"
+
+
+def next_methodology_version(version: str) -> str:
+    try:
+        n = int(str(version).split("-")[-1]) + 1
+    except (ValueError, IndexError):
+        n = 1
+    return f"METHODOLOGY-{n:03d}"
+
+
+def recommendation_id(payload: dict[str, Any]) -> str:
+    key = json.dumps({k: payload.get(k) for k in ["run_id", "source", "description", "affected_metric", "impacted_methodology_section"]}, sort_keys=True, ensure_ascii=False)
+    return "REC-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def make_recommendation(run_id: str, today: str, source: str, description: str, evidence: dict[str, Any], metric: str, severity: str, section: str, origin_version: str) -> dict[str, Any]:
+    row = {"recommendation_id": "", "run_id": run_id, "date": today, "source": source, "description": description, "evidence": evidence, "affected_metric": metric, "severity": severity, "impacted_methodology_section": section, "status": "PENDING", "human_comment": None, "decision_date": None, "methodology_version_origin": origin_version, "methodology_version_target": None}
+    row["recommendation_id"] = recommendation_id(row)
+    return row
+
+
+def extract_methodology_recommendations(config: dict[str, Any], out_root: Path, run_id: str, today: str, forward: dict[str, Any]) -> list[dict[str, Any]]:
+    origin = current_methodology_version(config)
+    m = forward.get("metrics", {})
+    rows = forward.get("rows", [])
+    recs = [
+        make_recommendation(run_id, today, "forward_test_postmortem.md", "Revisar manualmente patrones de decisiones LOSS antes de cambiar reglas; evidencia insuficiente no debe aplicarse automáticamente.", {"loss_rows": [r for r in rows if r.get("status") == "LOSS"][:10], "postmortem": str((out_root / "forward_test_postmortem.md").relative_to(ROOT))}, "hit_rate", "MEDIUM", "risk_rules.loss_review", origin),
+        make_recommendation(run_id, today, "forward_test_summary.json", "Analizar si las decisiones bloqueadas que hubieran funcionado indican exceso de conservadurismo antes de proponer cambios de umbrales.", {"blocked_would_have_worked": m.get("blocked_would_have_worked"), "summary": str((out_root / "forward_test_summary.json").relative_to(ROOT))}, "blocked_would_have_worked", "LOW" if not m.get("blocked_would_have_worked") else "MEDIUM", "risk_rules.conservatism", origin),
+        make_recommendation(run_id, today, "forward_test_results.csv", "Mantener NOT_EVALUABLE visible y mejorar cobertura de datos sin imputar precios.", {"not_evaluable": m.get("not_evaluable"), "results": str((out_root / "forward_test_results.csv").relative_to(ROOT))}, "not_evaluable", "MEDIUM" if m.get("not_evaluable") else "LOW", "data_quality.forward_test_coverage", origin),
+    ]
+    # Traza de fuentes de memoria usadas para contexto; no convierte texto libre en hechos definitivos.
+    recs.append(make_recommendation(run_id, today, "memory/methodology_state.md + memory/postmortem_memory.md", "Contrastar recomendaciones nuevas contra memoria metodológica y post-mortems antes de aprobar cambios versionados.", {"methodology_state_hash": sha256_text(read_text(ROOT / config["context_management"]["memory_files"]["methodology_state"])), "postmortem_memory_hash": sha256_text(read_text(ROOT / config["context_management"]["memory_files"]["postmortem_memory"]))}, "methodology_consistency", "LOW", "methodology_review.process", origin))
+    return recs
+
+
+def sync_human_review(config: dict[str, Any], out_root: Path, run_id: str, today: str, forward: dict[str, Any]) -> dict[str, Any]:
+    files = methodology_review_files(config)
+    for path in files.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+    existing = {r.get("recommendation_id") for r in read_jsonl(files["queue"])}
+    new_rows = [r for r in extract_methodology_recommendations(config, out_root, run_id, today, forward) if r["recommendation_id"] not in existing]
+    for row in new_rows:
+        append_jsonl(files["queue"], row)
+    queue = {r["recommendation_id"]: r for r in read_jsonl(files["queue"])}
+    decisions = read_jsonl(files["decisions"])
+    for d in decisions:
+        rid = d.get("recommendation_id")
+        if rid in queue and d.get("status") in {"APPROVED", "REJECTED", "NEEDS_MORE_EVIDENCE"}:
+            queue[rid].update({"status": d["status"], "human_comment": d.get("human_comment"), "decision_date": d.get("decision_date"), "methodology_version_target": d.get("methodology_version_target")})
+    rows = list(queue.values())
+    counts = {s: sum(1 for r in rows if r.get("status") == s) for s in ["PENDING", "APPROVED", "REJECTED", "NEEDS_MORE_EVIDENCE"]}
+    approved = [r for r in rows if r.get("status") == "APPROVED"]
+    rejected = [r for r in rows if r.get("status") == "REJECTED"]
+    version = current_methodology_version(config)
+    target = next_methodology_version(version) if approved else None
+    proposed = {"run_id": run_id, "date": today, "current_methodology_version": version, "proposed_methodology_version": target, "approved_recommendations": approved, "rejected_recommendations": rejected, "pending_counts": counts, "config_demo_yaml_modified": False, "paper_trading_only": True, "broker_connected": False, "real_order": False}
+    write_json(out_root / "proposed_methodology_changes.json", proposed)
+    md = [f"# Cambios metodológicos propuestos - {today}", "", f"- Versión vigente: `{version}`", f"- Versión propuesta: `{target or 'sin cambios aprobados'}`", "- No modifica `config/config_demo.yaml` automáticamente.", "- Paper trading únicamente; broker desconectado; real_order=false.", "", "## Aprobadas"]
+    md += [f"- `{r['recommendation_id']}`: {r['description']}" for r in approved] or ["- Ninguna."]
+    md += ["", "## Rechazadas"] + ([f"- `{r['recommendation_id']}`: {r['description']}" for r in rejected] or ["- Ninguna."])
+    (out_root / "proposed_methodology_changes.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    if approved:
+        prev = read_text(ROOT / config["context_management"]["memory_files"]["methodology_state"])
+        new_state = prev + "\n\n<!-- proposed-only: approved human review recommendations; config not auto-modified -->\n" + json.dumps([r["recommendation_id"] for r in approved], ensure_ascii=False)
+        version_row = {"methodology_version": target, "date": today, "run_id": run_id, "approved_changes": [r["recommendation_id"] for r in approved], "rejected_recommendations": [r["recommendation_id"] for r in rejected], "evidence": [r.get("evidence") for r in approved], "previous_methodology_hash": sha256_text(prev), "proposed_methodology_hash": sha256_text(new_state), "config_demo_yaml_modified": False}
+        known_versions = {v.get("methodology_version") for v in read_jsonl(files["versions"])}
+        if target not in known_versions:
+            append_jsonl(files["versions"], version_row)
+    return {"files": {k: str(v.relative_to(ROOT)) for k, v in files.items()}, "new_recommendations": len(new_rows), "counts": counts, "current_methodology_version": current_methodology_version(config), "approved": approved[-10:], "rejected": rejected[-10:], "pending": [r for r in rows if r.get("status") == "PENDING"][-10:], "needs_more_evidence": [r for r in rows if r.get("status") == "NEEDS_MORE_EVIDENCE"][-10:], "proposed_changes": str((out_root / "proposed_methodology_changes.json").relative_to(ROOT))}
 
 def parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
@@ -1392,7 +1488,7 @@ def write_universe_snapshots(out_root: Path, universes: dict[str, Any]) -> dict[
         paths[name] = str((out_root / f"{name}.json").relative_to(ROOT))
     return paths
 
-def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any], validation_report: dict[str, Any], performance: dict[str, Any] | None = None, forward_test: dict[str, Any] | None = None) -> None:
+def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any], validation_report: dict[str, Any], performance: dict[str, Any] | None = None, forward_test: dict[str, Any] | None = None, human_review: dict[str, Any] | None = None) -> None:
     lines = [
         f"# Reporte diario DEMO - {today}",
         "",
@@ -1422,6 +1518,16 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
         f"- Hit rate: {((forward_test or {}).get('metrics') or {}).get('hit_rate')}",
         "- Recomendaciones metodológicas: informativas; no modifican config ni reglas humanas.",
         "",
+        "## Revisión humana metodológica",
+        f"- Versión metodológica actual: `{(human_review or {}).get('current_methodology_version', 'METHODOLOGY-000')}`",
+        f"- Pendientes: `{((human_review or {}).get('counts') or {}).get('PENDING', 0)}`",
+        f"- Aprobadas: `{((human_review or {}).get('counts') or {}).get('APPROVED', 0)}`",
+        f"- Rechazadas: `{((human_review or {}).get('counts') or {}).get('REJECTED', 0)}`",
+        f"- Requieren más evidencia: `{((human_review or {}).get('counts') or {}).get('NEEDS_MORE_EVIDENCE', 0)}`",
+        f"- Cola: `{((human_review or {}).get('files') or {}).get('queue', 'memory/human_review_queue.jsonl')}`",
+        f"- Cambios propuestos: `{(human_review or {}).get('proposed_changes', 'no generado')}`",
+        "- Las aprobaciones generan propuestas versionadas; no modifican config automáticamente.",
+        "",
         "## Decisiones finales",
         "| Ticker | Score | Decisión final | Peso final | Reglas disparadas |",
         "|---|---:|---|---:|---|",
@@ -1436,7 +1542,7 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
     else:
         lines.append("| - | Sin operaciones ejecutadas en paper | 0.00 | false |")
     lines += ["", "## Contratos Fase 2", "- Los outputs críticos se validan contra schemas versionados en `schemas/`.", "- Si un contrato crítico falla, la corrida termina con un error explícito antes de persistir el resultado inválido."]
-    lines += ["", "## Limitaciones Fase 7", "- Datos reales solo si config los habilita; fixtures siguen default y fallback.", "- decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
+    lines += ["", "## Limitaciones Fase 8", "- Datos reales solo si config los habilita; fixtures siguen default y fallback.", "- decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1515,7 +1621,7 @@ def build_memory_update(run_id: str, today: str, decisions: list[dict[str, Any]]
     items = []
     for decision, audit, final in zip(decisions, audits, finals):
         items.append({"ticker": decision["ticker"], "fact_type": "demo_decision", "summary": f"{decision['decision']} / {audit['audit_result']} / {final['final_decision']}", "source_run_id": run_id, "verified": False})
-    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 7; datos de mercado pueden ser fixture o proveedor explícito según data_quality_report."}
+    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 8; datos de mercado pueden ser fixture o proveedor explícito según data_quality_report."}
 
 
 def update_external_memory(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], data_quality_report: dict[str, Any], forward_test: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1524,14 +1630,14 @@ def update_external_memory(config: dict[str, Any], run_id: str, today: str, memo
     mf = {key: ROOT / rel for key, rel in memory.items()}
 
     write_json(mf["portfolio_state"], portfolio)
-    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 7 ejecutada en DEMO; datos de cierre controlados, forward-test paper y sin broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
+    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 8 ejecutada en DEMO; datos de cierre controlados, forward-test paper y sin broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
     append_markdown_section(mf["methodology_state"], f"Revisión operativa {run_id}", ["Se mantiene metodología DEMO determinística basada en fixtures locales.", "Los hechos no verificados se registran explícitamente como no verificados."])
     if forward_test is not None:
         fm = forward_test["metrics"]
         append_markdown_section(mf["methodology_state"], f"Recomendaciones forward-test {run_id}", [f"Hit rate observado: {fm['hit_rate']} sobre {fm['evaluable_decisions']} decisiones evaluables; recomendación informativa, no modifica reglas.", f"Bloqueadas que hubieran funcionado: {fm['blocked_would_have_worked']}; bloqueadas que evitaron pérdidas: {fm['blocked_avoided_losses']}.", "No actualizar config_demo.yaml ni reglas humanas automáticamente."])
     append_markdown_section(mf["data_quality_memory"], f"Calidad de datos {run_id}", [f"Fuente: {data_quality_report['source']}.", f"Activos revisados: {data_quality_report['total_assets_checked']}.", f"Conteo por calidad: {data_quality_report['quality_counts']}."])
     append_markdown_section(mf["config_change_log"], f"Digest config {run_id}", [f"sha256: {config_digest(config)}.", "No se registraron credenciales ni integraciones operativas."])
-    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 7 evalúa ventanas forward-test vencidas en paper trading; si faltan datos marca NOT_EVALUABLE.", f"Estado forward-test: {forward_test['status'] if forward_test else 'no calculado'}.", f"Métricas: {forward_test['metrics'] if forward_test else {}}."])
+    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 8 evalúa ventanas forward-test vencidas en paper trading; si faltan datos marca NOT_EVALUABLE.", f"Estado forward-test: {forward_test['status'] if forward_test else 'no calculado'}.", f"Métricas: {forward_test['metrics'] if forward_test else {}}."])
 
     for decision, audit, final in zip(decisions, audits, finals):
         item = {"run_id": run_id, "date": today, "ticker": decision["ticker"], "decision_agent_action": decision["decision"], "audit_result": audit["audit_result"], "final_action": final["final_decision"], "reason": final["reason_for_blocking"] or final["reason_for_adjustment"]}
@@ -1558,16 +1664,16 @@ def write_memory_diff_markdown(path: Path, memory_diff: dict[str, Any]) -> None:
 
 
 def build_run_manifest(run_id: str, today: str, config: dict[str, Any], prompts: dict[str, Any], memory: dict[str, str], validation_report: dict[str, Any]) -> dict[str, Any]:
-    return {"run_id": run_id, "date": today, "phase": "FASE_7", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
+    return {"run_id": run_id, "date": today, "phase": "FASE_8", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ejecuta Fase 7 DEMO con forward-test y post-mortem, sin broker.")
+    parser = argparse.ArgumentParser(description="Ejecuta Fase 8 DEMO con forward-test y post-mortem, sin broker.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
-    run_id = f"{today}_demo_phase7_{stamp}"
+    run_id = f"{today}_demo_phase8_{stamp}"
 
     config = load_config()
     errors = validate_demo_safety(config) + validate_market_data_safety(config) + validate_llm_safety(config)
@@ -1618,11 +1724,12 @@ def main() -> int:
     data_quality_report["investable_assets_with_sufficient_data"] = sorted({a["ticker"] for a in scoring_assets})
     data_quality_report["investable_assets_blocked"] = sorted(eligible_tickers - {a["ticker"] for a in scoring_assets})
     memory_update = build_memory_update(run_id, today, decisions, audits, finals)
+    human_review = sync_human_review(config, out_root, run_id, today, forward_test)
     memory_diff = update_external_memory(config, run_id, today, memory, scored, decisions, audits, finals, portfolio, data_quality_report, forward_test)
-    context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root)
+    context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root, human_review)
     research_outputs, llm_summary = research_with_optional_llm(config, today, candidates, out_root / "context_packs" / "research.json", log_path)
     if llm_summary["enabled"]:
-        context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root)
+        context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root, human_review)
     append_jsonl(log_path, {"event": "llm_summary", "run_id": run_id, **llm_summary})
 
     validation_report = {"run_id": run_id, "date": today, "schema_version": "phase2.v1", "results": []}
@@ -1657,7 +1764,7 @@ def main() -> int:
     write_json(out_root / "data_quality_report.json", data_quality_report)
     write_json(out_root / "universe_coverage_report.json", coverage_report)
     write_json(out_root / "validation_report.json", validation_report)
-    generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio, validation_report, performance, forward_test)
+    generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio, validation_report, performance, forward_test, human_review)
 
     portfolio_path = ROOT / config["context_management"]["memory_files"]["portfolio_state"]
     write_json(portfolio_path, portfolio)
