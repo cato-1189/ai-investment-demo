@@ -1,1 +1,2 @@
 # Fase 1 usa solo librerías estándar de Python.
+yfinance>=0.2.40

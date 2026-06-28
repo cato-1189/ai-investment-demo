@@ -91,7 +91,7 @@ def build_preflight(config: dict[str, Any], date: str, *, require_manual_csv: bo
     add_check(checks, "decision_audit_real_disabled", "PASS" if not ({"decision_agent", "audit_agent"} & agents) else "FAIL", "decision_agent y audit_agent reales deben estar deshabilitados.", real_agents=sorted(agents))
     llm_ok = not llm.get("enabled") or allow_real_llm
     add_check(checks, "llm_real_disabled", "PASS" if llm_ok else "FAIL", "LLM real deshabilitado salvo autorización explícita.", llm_enabled=bool(llm.get("enabled")), allow_real_llm=allow_real_llm)
-    provider_ok = bool(settings.get("provider")) and settings.get("provider") in {"fixture", "stooq_csv", "manual_csv"}
+    provider_ok = bool(settings.get("provider")) and settings.get("provider") in {"fixture", "stooq_csv", "manual_csv", "yfinance", "multi_provider"}
     add_check(checks, "data_provider_configured", "PASS" if provider_ok else "FAIL", "Proveedor de datos configurado y soportado.", provider=settings.get("provider"), provider_priority=settings.get("provider_priority"))
 
     manual_required = require_manual_csv or settings.get("provider") == "manual_csv"
@@ -111,6 +111,10 @@ def build_preflight(config: dict[str, Any], date: str, *, require_manual_csv: bo
 
     bench_present = sorted(set(BENCHMARKS) & {b.get("ticker") for b in config.get("benchmark_universe", [])})
     bench_missing = sorted(set(BENCHMARKS) - set(bench_present))
+    min_fund = float(settings.get("minimum_fundamentals_coverage_pct", 0.0))
+    min_rat = float(settings.get("minimum_ratios_coverage_pct", 0.0))
+    add_check(checks, "financial_coverage_policy", "PASS", "Política mínima de cobertura financiera cargada; se valida en corrida contra datos normalizados.", minimum_fundamentals_coverage_pct=min_fund, minimum_ratios_coverage_pct=min_rat, required_fields_for_scoring=settings.get("required_fields_for_scoring", []), fail_if_required_financial_fields_missing=settings.get("fail_if_required_financial_fields_missing", True))
+
     add_check(checks, "benchmarks_present", "PASS" if not bench_missing else "WARNING", "Benchmarks presentes o advertidos; no bloquean scoring invertible.", expected=BENCHMARKS, present=bench_present, missing=bench_missing)
 
     universe_ok = 0 < len(INVESTABLE) <= MAX_CONTROLLED_INVESTABLES

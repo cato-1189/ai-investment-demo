@@ -525,3 +525,58 @@ Si falta cobertura de activos o benchmarks, revisar `preflight_report.*`, `run_c
 - Sin modificación automática de `config/config_demo.yaml` ni reglas humanas.
 - Sin secretos hardcodeados.
 - Sin ampliar automáticamente el universo a `broad_market`.
+
+## Fase 12A: capa extensible de datos financieros automatizados
+
+La Fase 12A agrega una capa modular de proveedores financieros para que la demo no dependa solo de precios. Un precio de cierre y un volumen ayudan a validar liquidez y valuación de mercado, pero no alcanzan para una decisión simulada responsable: el sistema también necesita ver fundamentos, ratios y metadata para detectar empresas con datos incompletos, deuda elevada, métricas no disponibles o proveedores fallando.
+
+### Qué datos financieros busca
+
+La normalización separa cada ticker en categorías auditables:
+
+- `price_data`: cierre, volumen y adjusted close.
+- `fundamentals_data`: market cap, revenue, net income, EBITDA si está disponible, EPS, assets, liabilities, equity, cash, debt, operating cash flow y free cash flow.
+- `ratios_data`: P/E, P/B, P/S, EV/EBITDA, debt/equity, ROE, ROA y dividend yield si existe.
+- `metadata_data`: moneda, exchange, sector e industry.
+- `corporate_actions`: dividendos y splits cuando el proveedor los exponga.
+- `provider_errors`: errores visibles por proveedor y ticker.
+
+Cada campo normalizado incluye `provider`, `timestamp`, `is_estimated`, `is_missing` y `quality_status`. Si un dato no viene del proveedor, queda marcado como faltante; la Fase 12A no inventa fundamentals ni ratios.
+
+### Yahoo/yfinance es best-effort
+
+`yfinance` se integra como proveedor automático opcional y no oficial. Sirve para enriquecer la demo con datos de Yahoo Finance, pero debe tratarse como fuente best-effort: puede cambiar formato, limitar respuestas, devolver campos vacíos o fallar temporalmente. Por eso el sistema conserva errores de proveedor, permite fallback a `manual_csv` y está diseñado para sumar proveedores futuros como FMP, EODHD, Alpha Vantage, Polygon o Tiingo sin cambiar el flujo principal.
+
+### Cómo activar Yahoo/yfinance
+
+Por seguridad, `config/config_demo.yaml` mantiene `enable_yfinance_provider: false` por default. Un humano puede activarlo manualmente para pruebas DEMO cambiando la configuración de mercado real, por ejemplo:
+
+```yaml
+market_data:
+  mode: "real"
+  enabled: true
+  provider: "multi_provider"
+  provider_priority: ["yfinance", "manual_csv"]
+  enable_yfinance_provider: true
+  allow_manual_csv_fallback: true
+```
+
+Esto no conecta broker, no permite órdenes reales y no activa `decision_agent` ni `audit_agent` reales. La configuración demo no se modifica automáticamente por los scripts.
+
+### Cómo interpretar datos faltantes y calidad antes del scoring
+
+Revisar `data_quality_report.json`, `snapshots/normalized_market_data.json` y `real_data_pilot_report.json` antes de scoring. La sección `coverage_by_data_type` muestra cobertura de precios, fundamentals, ratios, metadata y benchmarks. Además, cada activo contiene `scoring_readiness`:
+
+- `price_ready`
+- `fundamentals_ready`
+- `ratios_ready`
+- `metadata_ready`
+- `overall_data_quality`
+- `missing_required_fields`
+- `ready_for_scoring`
+
+Los mínimos configurables viven en `market_data`: `minimum_price_coverage_pct`, `minimum_fundamentals_coverage_pct`, `minimum_ratios_coverage_pct`, `required_fields_for_scoring` y `fail_if_required_financial_fields_missing`. Si faltan campos requeridos y la política exige bloquear, el activo queda fuera antes del scoring. Los benchmarks siguen fuera del scoring por default y solo se usan para comparación de performance.
+
+### Límites explícitos de Fase 12A
+
+La fase continúa en modo DEMO/paper trading: sin broker, sin órdenes reales, con `real_order=false`, sin GitHub Actions, sin cron, sin automatización diaria y sin agentes reales de decisión/auditoría. La siguiente etapa antes de automatización diaria debería robustecer políticas de cobertura, observabilidad, retries/backoff por proveedor, almacenamiento histórico y revisión humana de umbrales.

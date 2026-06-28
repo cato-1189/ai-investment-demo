@@ -15,6 +15,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from financial_data_providers import FIELD_CATEGORIES, fetch_yfinance, flatten_record_for_legacy
+
 from schema_validation import SchemaValidationError, assert_valid, load_schema, validate_schema
 
 
@@ -464,6 +466,9 @@ def has_sufficient_data_for_scoring(asset: dict[str, Any], config: dict[str, Any
     order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
     minimum = market_data_settings(config).get("min_quality_for_scoring", "MEDIUM")
     required = ["price_close", "avg_volume_usd", "metrics"]
+    readiness = asset.get("scoring_readiness") or {}
+    if readiness and not readiness.get("ready_for_scoring", False):
+        return False
     return all(asset.get(k) not in (None, {}) for k in required) and not asset.get("missing_fields") and order.get(asset.get("data_quality", "LOW"), 0) >= order.get(minimum, 1)
 
 
@@ -477,6 +482,13 @@ def market_data_settings(config: dict[str, Any]) -> dict[str, Any]:
         "enabled": False,
         "provider": "fixture",
         "provider_priority": ["stooq_csv", "manual_csv"],
+        "financial_data_providers": ["stooq_csv", "manual_csv"],
+        "enable_yfinance_provider": False,
+        "minimum_price_coverage_pct": 0.60,
+        "minimum_fundamentals_coverage_pct": 0.0,
+        "minimum_ratios_coverage_pct": 0.0,
+        "required_fields_for_scoring": ["price_data.close", "price_data.volume"],
+        "fail_if_required_financial_fields_missing": True,
         "minimum_real_data_coverage_pct": 0.60,
         "allow_manual_csv_fallback": False,
         "manual_csv_path": "data/manual_market_data/{date}/market_data.csv",
@@ -507,11 +519,11 @@ def validate_market_data_safety(config: dict[str, Any]) -> list[str]:
         errors.append("market_data.mode=real requiere market_data.enabled=true explícito")
     if settings.get("enabled") and settings.get("mode") != "real":
         errors.append("market_data.enabled=true requiere market_data.mode=real explícito")
-    supported = {"fixture", "stooq_csv", "manual_csv"}
+    supported = {"fixture", "stooq_csv", "manual_csv", "yfinance", "multi_provider"}
     if settings.get("provider") not in supported:
         errors.append(f"market_data.provider no soportado: {settings.get('provider')}")
     for provider in settings.get("provider_priority", []):
-        if provider not in supported - {"fixture"}:
+        if provider not in supported - {"fixture", "multi_provider"}:
             errors.append(f"market_data.provider_priority contiene proveedor no soportado: {provider}")
     if settings.get("mode") == "real" and "manual_csv" in settings.get("provider_priority", []) and not settings.get("allow_manual_csv_fallback"):
         errors.append("manual_csv en provider_priority requiere allow_manual_csv_fallback=true")
@@ -589,7 +601,15 @@ def fetch_real_multi_provider(universe: list[dict[str, Any]], today: str, settin
         if provider == "manual_csv" and not settings.get("allow_manual_csv_fallback"):
             provider_errors.append({"provider": provider, "error": "fallback CSV manual no habilitado"})
             continue
-        payload = fetch_stooq_csv(pending, today, int(settings.get("timeout_seconds", 20))) if provider == "stooq_csv" else fetch_manual_csv(pending, today, settings)
+        if provider == "stooq_csv":
+            payload = fetch_stooq_csv(pending, today, int(settings.get("timeout_seconds", 20)))
+        elif provider == "manual_csv":
+            payload = fetch_manual_csv(pending, today, settings)
+        elif provider == "yfinance":
+            yf_payload = fetch_yfinance(pending, today, settings)
+            payload = {**yf_payload, "assets": [flatten_record_for_legacy(r) for r in yf_payload.get("assets", [])]}
+        else:
+            payload = {"provider": provider, "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": [], "errors": [{"provider": provider, "error": "proveedor no implementado"}]}
         provider_payloads.append(payload)
         provider_errors.extend([{**e, "provider": e.get("provider", provider)} for e in payload.get("errors", [])])
         normalized, _ = normalize_market_data(payload, {"market_data": settings}, today)
@@ -647,10 +667,14 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
         if raw.get("Date") in {None, "", "N/D"}:
             missing.append("provider_date")
         # Fundamentals remain from fixture baseline and are explicitly estimated, never invented as real.
-        estimated = [f"metrics.{k}" for k in base.get("metrics", {})]
-        quality = "HIGH" if not missing and len(estimated) == 0 else "MEDIUM" if not missing else "LOW"
+        native_financial_data = row.get("financial_data")
+        financial_data = native_financial_data or build_legacy_financial_data(ticker, row.get("provider", raw_payload["provider"]), raw, today)
+        readiness = financial_readiness(financial_data, market_data_settings(config), base)
+        missing.extend(readiness["missing_required_fields"])
+        estimated = [] if native_financial_data else [f"metrics.{k}" for k in base.get("metrics", {})]
+        quality = readiness["overall_data_quality"] if not estimated else ("MEDIUM" if not missing else "LOW")
         provider_name = row.get("provider", raw_payload["provider"])
-        base.update({"data_source": "real_provider_with_fixture_fundamentals" if estimated else "real_provider", "provider": provider_name, "provider_date": raw.get("Date"), "as_of_date": today, "data_quality": quality, "estimated_fields": estimated, "missing_fields": sorted(set(missing)), "provider_errors": errors})
+        base.update({"data_source": "financial_provider" if native_financial_data else "real_provider_with_fixture_fundamentals", "provider": provider_name, "provider_date": raw.get("Date"), "as_of_date": today, "data_quality": quality, "estimated_fields": estimated, "missing_fields": sorted(set(missing)), "provider_errors": errors, "financial_data": financial_data, "scoring_readiness": readiness})
         assets.append(base)
     error_by_ticker = {e.get("ticker"): e.get("error") for e in raw_payload.get("errors", []) if e.get("ticker")}
     for ticker, error in error_by_ticker.items():
@@ -659,6 +683,42 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
             base.update({"data_source": "real_provider_failed", "provider": raw_payload["provider"], "as_of_date": today, "data_quality": "LOW", "estimated_fields": [], "missing_fields": required, "provider_errors": [error]})
             assets.append(base)
     return assets, build_data_quality_report([], "pending", today, assets, raw_payload)
+
+
+def build_legacy_financial_data(ticker: str, provider: str, raw: dict[str, Any], today: str) -> dict[str, Any]:
+    ts = utc_now().isoformat()
+    rec = {"ticker": ticker, "provider": provider, "timestamp": ts, "price_data": {}, "fundamentals_data": {}, "ratios_data": {}, "metadata_data": {}, "corporate_actions": {}, "provider_errors": []}
+    def cell(v):
+        miss = v in (None, "", "N/D")
+        return {"value": None if miss else v, "provider": provider, "timestamp": ts, "is_estimated": False, "is_missing": miss, "quality_status": "MISSING" if miss else "OK"}
+    for cat, names in FIELD_CATEGORIES.items():
+        rec[cat] = {n: cell(None) for n in names}
+    rec["price_data"].update({"close": cell(raw.get("Close")), "volume": cell(raw.get("Volume")), "adjusted_close": cell(raw.get("Adj Close"))})
+    rec["metadata_data"]["currency"] = cell(raw.get("Currency"))
+    return rec
+
+
+def financial_readiness(financial_data: dict[str, Any], settings: dict[str, Any], base: dict[str, Any] | None = None) -> dict[str, Any]:
+    base = base or {}
+    categories = ["price_data", "fundamentals_data", "ratios_data", "metadata_data"]
+    coverage = {}
+    missing_required = []
+    for cat in categories:
+        fields = financial_data.get(cat, {})
+        total = len(fields) or 1
+        present = len([v for v in fields.values() if not v.get("is_missing")])
+        coverage[cat] = round(present / total, 4)
+    required = settings.get("required_fields_for_scoring") or ["price_data.close", "price_data.volume"]
+    for req in required:
+        cat, _, name = req.partition(".")
+        if not cat or not name or financial_data.get(cat, {}).get(name, {}).get("is_missing", True):
+            missing_required.append(req)
+    price_ready = coverage["price_data"] >= float(settings.get("minimum_price_coverage_pct", 0.60)) and not any(f.startswith("price_data.") for f in missing_required)
+    fundamentals_ready = coverage["fundamentals_data"] >= float(settings.get("minimum_fundamentals_coverage_pct", 0.0)) and not any(f.startswith("fundamentals_data.") for f in missing_required)
+    ratios_ready = coverage["ratios_data"] >= float(settings.get("minimum_ratios_coverage_pct", 0.0)) and not any(f.startswith("ratios_data.") for f in missing_required)
+    metadata_ready = coverage["metadata_data"] > 0 or not any(f.startswith("metadata_data.") for f in missing_required)
+    ok = price_ready and fundamentals_ready and ratios_ready and metadata_ready and (not missing_required or not settings.get("fail_if_required_financial_fields_missing", True))
+    return {"price_ready": price_ready, "fundamentals_ready": fundamentals_ready, "ratios_ready": ratios_ready, "metadata_ready": metadata_ready, "overall_data_quality": "HIGH" if ok and min(coverage.values()) >= .75 else "MEDIUM" if ok else "LOW", "coverage": coverage, "missing_required_fields": sorted(set(missing_required)), "ready_for_scoring": ok}
 
 
 def load_market_data(config: dict[str, Any], today: str, run_id: str, log_path: Path, out_root: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str]]:
@@ -1682,6 +1742,7 @@ def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: 
             flagged.append({"ticker": asset["ticker"], "alerts": sorted(set(alerts))})
         if not missing_fields and quality in {"HIGH", "MEDIUM"}:
             complete.append(asset["ticker"])
+    category_coverage = build_category_coverage(assets)
     return {
         "run_id": run_id,
         "date": today,
@@ -1694,6 +1755,7 @@ def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: 
         "missing_data": missing,
         "estimated_data": estimated,
         "provider_errors": provider_errors,
+        "coverage_by_data_type": category_coverage,
         "blocked_assets": sorted(set(blocked)),
         "investable_assets_with_sufficient_data": sorted(set(complete) - set(blocked)),
         "investable_assets_blocked": sorted(set(blocked)),
@@ -1703,6 +1765,29 @@ def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: 
         "data_timestamp_utc": (raw_payload or {}).get("fetched_at", utc_now().isoformat()),
     }
 
+
+
+def build_category_coverage(assets: list[dict[str, Any]]) -> dict[str, Any]:
+    categories = ["price_data", "fundamentals_data", "ratios_data", "metadata_data"]
+    out = {}
+    for cat in categories:
+        ready_name = cat.replace("_data", "") + "_ready"
+        with_any = 0
+        ready = 0
+        total = len(assets)
+        missing = []
+        for asset in assets:
+            fd = asset.get("financial_data", {}).get(cat, {})
+            has_any = any(not v.get("is_missing", True) for v in fd.values()) if fd else False
+            if has_any:
+                with_any += 1
+            if asset.get("scoring_readiness", {}).get(ready_name, False):
+                ready += 1
+            else:
+                missing.append(asset.get("ticker"))
+        out[cat] = {"assets_checked": total, "assets_with_any_data": with_any, "assets_ready": ready, "coverage_pct": round(with_any / total, 4) if total else 0.0, "missing_or_not_ready": sorted(t for t in missing if t)}
+    out["benchmarks"] = {"assets_checked": 0, "assets_with_any_data": 0, "assets_ready": 0, "coverage_pct": 0.0, "missing_or_not_ready": []}
+    return out
 
 def build_memory_update(run_id: str, today: str, decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]]) -> dict[str, Any]:
     items = []

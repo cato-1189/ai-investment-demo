@@ -34,6 +34,13 @@ market_data:
   enabled: false          # debe ser true junto con mode=real para usar proveedor externo
   provider: "fixture"    # fixture | stooq_csv | manual_csv
   provider_priority: ["stooq_csv", "manual_csv"]
+  financial_data_providers: ["stooq_csv", "manual_csv"]
+  enable_yfinance_provider: false
+  minimum_price_coverage_pct: 0.60
+  minimum_fundamentals_coverage_pct: 0.0
+  minimum_ratios_coverage_pct: 0.0
+  required_fields_for_scoring: ["price_data.close", "price_data.volume"]
+  fail_if_required_financial_fields_missing: true
   minimum_real_data_coverage_pct: 0.60
   allow_manual_csv_fallback: false
   manual_csv_path: "data/manual_market_data/{date}/market_data.csv"
@@ -49,6 +56,10 @@ market_data:
     stooq_csv:
       requires_api_key: false
       base_url: "https://stooq.com"
+    yfinance:
+      requires_api_key: false
+      official_api: false
+      best_effort: true
 
 performance_tracking:
   enabled: true
