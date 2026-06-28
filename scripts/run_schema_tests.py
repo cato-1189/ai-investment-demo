@@ -256,5 +256,48 @@ class Phase6PerformanceTests(unittest.TestCase):
         self.assertTrue(all(t["real_order"] is False for t in trades))
 
 
+class Phase6BUniverseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = run_demo.load_config()
+        self.today = "2026-06-27"
+
+    def test_benchmark_does_not_enter_scoring_when_not_investable(self) -> None:
+        config = dict(self.config)
+        config["universe_modes"] = {**self.config["universe_modes"], "default": "test_bench", "test_bench": {"symbols": ["SPY", "AAPL"]}}
+        config["market_data"] = {**self.config["market_data"], "universe_mode": "test_bench", "universe": []}
+        universes = run_demo.resolve_universes(config)
+        self.assertNotIn("SPY", {a["ticker"] for a in universes["investable"]})
+        self.assertIn("SPY", {a["ticker"] for a in universes["excluded"]})
+
+    def test_investable_asset_enters_scoring_with_sufficient_data(self) -> None:
+        asset = {**run_demo.read_json(run_demo.FIXTURE_PATH)[0], "eligible_for_investment": True, "instrument_type": "common_stock"}
+        self.assertTrue(run_demo.has_sufficient_data_for_scoring(asset, self.config))
+        scored = run_demo.score_asset(asset, self.config["scoring_weights"])
+        self.assertEqual(scored["ticker"], asset["ticker"])
+
+    def test_low_quality_asset_is_blocked_before_scoring(self) -> None:
+        asset = {**run_demo.read_json(run_demo.FIXTURE_PATH)[0], "data_quality": "LOW", "missing_fields": ["price_close"]}
+        self.assertFalse(run_demo.has_sufficient_data_for_scoring(asset, self.config))
+
+    def test_demo_small_is_default_universe_mode(self) -> None:
+        self.assertEqual(run_demo.configured_universe_mode(self.config), "demo_small")
+        self.assertEqual({a["ticker"] for a in run_demo.resolve_universes(self.config)["investable"]}, {"AAPL", "MSFT", "MELI", "YPF", "VALE", "PBR"})
+
+    def test_liquid_core_loads_more_assets(self) -> None:
+        config = dict(self.config)
+        config["market_data"] = {**self.config["market_data"], "universe_mode": "liquid_core", "universe": []}
+        self.assertGreater(len(run_demo.resolve_universes(config)["investable"]), len(run_demo.resolve_universes(self.config)["investable"]))
+
+    def test_universe_outputs_separate_investable_and_benchmarks(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp_name:
+            tmp = Path(tmp_name)
+            paths = run_demo.write_universe_snapshots(tmp, run_demo.resolve_universes(self.config))
+            investable = json.loads((tmp / "investable_universe_snapshot.json").read_text(encoding="utf-8"))
+            benchmarks = json.loads((tmp / "benchmark_universe_snapshot.json").read_text(encoding="utf-8"))
+            self.assertIn("investable_universe_snapshot", paths)
+            self.assertFalse({"SPY", "QQQ", "EWZ", "ARGT", "BIL"} & {a["ticker"] for a in investable})
+            self.assertTrue({"SPY", "QQQ", "EWZ", "ARGT", "BIL"} <= {a["ticker"] for a in benchmarks})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
