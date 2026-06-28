@@ -209,3 +209,84 @@ Cada corrida genera `outputs/daily_runs/<YYYY-MM-DD>/<run_id>/universe_coverage_
 La Fase 7 evalúa ventanas vencidas de 3, 6 y 12 meses desde `memory/forward_test_pending.csv`, escribe resultados en `memory/forward_test_results.csv` y genera un post-mortem por corrida en `forward_test_postmortem.md`. Si faltan precios, la fila queda como `NOT_EVALUABLE`; no se inventan datos. Las recomendaciones metodológicas se agregan a memoria externa como sugerencias y no modifican reglas ni `config_demo.yaml` automáticamente.
 
 Ver `docs/forward_test_phase7.md` para la interpretación de hit rate, decisiones aprobadas/bloqueadas y uso de benchmarks.
+
+## Fase 9: prueba integral end-to-end DEMO
+
+La Fase 9 agrega una validación integral reproducible para comprobar que las fases anteriores funcionen juntas antes de pasar a un piloto con datos reales. La prueba corre por default con fixtures/mocks locales, no requiere credenciales ni red, no conecta broker, no ejecuta órdenes reales y no habilita `decision_agent` ni `audit_agent` reales.
+
+### Cómo correr la validación integral
+
+```bash
+python scripts/run_e2e_validation.py --date 2026-06-27
+```
+
+El script ejecuta internamente `scripts/run_demo.py` con una muestra temporal de validación. Esa muestra no modifica automáticamente `config/config_demo.yaml` ni las reglas humanas.
+
+### Muestra controlada
+
+Activos invertibles validados:
+
+- EEUU: `AAPL`, `MSFT`, `NVDA`.
+- Argentina/ADRs: `YPF`, `GGAL`, `MELI`.
+- Brasil/ADRs: `VALE`, `PBR`, `ITUB`.
+
+Benchmarks validados como benchmarks, no como candidatos de scoring:
+
+- `SPY`, `QQQ`, `EWZ`, `ARGT`, `BIL`.
+
+### Outputs principales
+
+Cada corrida genera una carpeta como:
+
+```text
+outputs/daily_runs/<YYYY-MM-DD>/<run_id>/
+```
+
+Dentro de esa carpeta, además de los outputs normales de la demo, la validación Fase 9 escribe:
+
+```text
+e2e_validation_report.json
+e2e_validation_report.md
+```
+
+El reporte muestra `PASS`, `FAIL` o `WARNING` por componente e indica outputs faltantes, warnings, datos faltantes, activos bloqueados, benchmarks que hubieran entrado incorrectamente al scoring, señales de broker u órdenes reales, estado de `real_order`, estado de `allow_real_orders` y confirmación de que `decision_agent` y `audit_agent` siguen mock.
+
+### Cómo interpretar el resultado
+
+- `PASS`: la validación se cumplió.
+- `WARNING`: hay una limitación visible y auditada, por ejemplo datos faltantes de benchmark en fixture o activos bloqueados. No se oculta.
+- `FAIL`: falta un output obligatorio o se violó una condición de seguridad/integridad.
+
+La validación confirma seguridad revisando `run_manifest.json`, `simulated_trades.csv`, outputs mock y reportes generados. En particular:
+
+- `broker_connected` debe ser `false`.
+- `allow_real_orders` debe ser `false`.
+- todo `real_order` observado debe ser `false`.
+- `SPY`, `QQQ`, `EWZ`, `ARGT` y `BIL` no deben aparecer en `scoring_results.json`.
+- Los context packs deben existir por agente y respetar sus límites configurados.
+
+### Demo normal sigue igual
+
+El comando histórico se mantiene compatible:
+
+```bash
+python scripts/run_demo.py --date 2026-06-27
+```
+
+La opción interna `--universe-symbols` existe para validaciones reproducibles y no es necesaria para el uso normal.
+
+### Limitaciones que se mantienen en Fase 9
+
+- Sin broker.
+- Sin órdenes reales.
+- Sin `real_order: true`.
+- Sin datos reales por default.
+- Sin API keys por default.
+- Sin GitHub Actions activado.
+- `decision_agent` y `audit_agent` reales siguen deshabilitados.
+- No se modifican automáticamente `config/config_demo.yaml` ni reglas humanas.
+- La deduplicación semántica profunda de memoria queda como control futuro; Fase 9 valida diff, idempotencia básica y ausencia de duplicaciones críticas evidentes.
+
+### Para Fase 10
+
+Fase 10 debería enfocarse en definir el piloto controlado con datos reales: proveedor de datos robusto, criterios de calidad más estrictos, manejo de moneda/FX, revisión humana obligatoria antes de cualquier automatización y controles adicionales antes de considerar cualquier integración operativa. Broker y órdenes reales deben seguir fuera de alcance salvo aprobación explícita futura.

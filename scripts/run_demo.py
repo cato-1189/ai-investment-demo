@@ -118,7 +118,21 @@ def validate_context_pack_limits(pack: dict[str, Any], config: dict[str, Any], a
     while tokens > limits["max_tokens"] and pack["sections"]:
         reducible = [s for s in pack["sections"] if isinstance(s.get("content"), list) and s["content"]]
         if not reducible:
-            break
+            text_sections = [s for s in pack["sections"] if isinstance(s.get("content"), str) and len(s["content"]) > 200]
+            if text_sections:
+                largest_text = max(text_sections, key=lambda s: len(s["content"]))
+                largest_text["content"] = largest_text["content"][-max(200, len(largest_text["content"]) // 2):]
+                largest_text["truncated"] = True
+                tokens = estimate_tokens(pack)
+                continue
+            rich_sections = [s for s in pack["sections"] if isinstance(s.get("content"), dict) and s.get("content")]
+            if not rich_sections:
+                break
+            largest_rich = max(rich_sections, key=lambda s: estimate_tokens(s.get("content")))
+            largest_rich["content"] = {"truncated_summary": "Contenido compactado por límite de context pack; ver outputs auditables de la corrida."}
+            largest_rich["truncated"] = True
+            tokens = estimate_tokens(pack)
+            continue
         largest = max(reducible, key=lambda s: len(s["content"]))
         largest["content"] = largest["content"][1:]
         largest["truncated"] = True
@@ -1670,12 +1684,17 @@ def build_run_manifest(run_id: str, today: str, config: dict[str, Any], prompts:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ejecuta Fase 8 DEMO con forward-test y post-mortem, sin broker.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
+    parser.add_argument("--universe-symbols", default=None, help="Lista CSV opcional para validaciones reproducibles; no modifica config_demo.yaml")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
     run_id = f"{today}_demo_phase8_{stamp}"
 
     config = load_config()
+    if args.universe_symbols:
+        symbols = [item.strip().upper() for item in args.universe_symbols.split(",") if item.strip()]
+        config["universe_modes"] = {**config.get("universe_modes", {}), "e2e_validation": {"description": "Muestra temporal Fase 9; no persistida en config_demo.yaml.", "symbols": symbols}}
+        config["market_data"] = {**config.get("market_data", {}), "universe_mode": "e2e_validation", "universe": []}
     errors = validate_demo_safety(config) + validate_market_data_safety(config) + validate_llm_safety(config)
     if errors:
         raise SystemExit("Validación DEMO falló: " + "; ".join(errors))
