@@ -422,9 +422,9 @@ python scripts/run_e2e_validation.py --date 2026-06-27
 python scripts/run_real_data_pilot.py --date 2026-06-27 --activate-real-data-pilot
 ```
 
-## Fase 11: controlled pilot con preflight operativo
+## Fase 11B: controlled pilot con data readiness
 
-La Fase 11 agrega una capa de ejecución controlada antes de automatizar cualquier corrida diaria. Su objetivo es decidir si una corrida DEMO/paper trading puede ejecutarse, debe bloquearse o puede continuar solo con aceptación humana de warnings.
+La Fase 11B agrega una corrección al preflight operativo: antes de lanzar el piloto controlado, valida si hay datos reales/manuales suficientes para la muestra chica de activos invertibles. Esto evita que el preflight dé `PASS` solo por seguridad/configuración y que el piloto falle después por un proveedor online inaccesible, por ejemplo Stooq con `403 Forbidden` o timeout. Todo sigue en modo DEMO/paper trading: sin broker, sin órdenes reales, sin cron, sin GitHub Actions y sin `decision_agent`/`audit_agent` reales.
 
 ### Cuándo usar cada comando
 
@@ -452,6 +452,12 @@ La Fase 11 agrega una capa de ejecución controlada antes de automatizar cualqui
   python scripts/run_controlled_pilot.py --date 2026-06-27
   ```
 
+  Para probar el proveedor online sin correr todo el pipeline, usar un probe liviano sobre la muestra chica invertible:
+
+  ```bash
+  python scripts/run_controlled_pilot.py --date 2026-06-27 --probe-data-provider
+  ```
+
   Si el preflight queda en `WARNING`, la corrida se bloquea por default. Para continuar con aceptación explícita del humano:
 
   ```bash
@@ -460,7 +466,7 @@ La Fase 11 agrega una capa de ejecución controlada antes de automatizar cualqui
 
 ### Qué valida el preflight
 
-El preflight de Fase 11 revisa, antes de ejecutar el piloto:
+El preflight de Fase 11B revisa, antes de ejecutar el piloto:
 
 - `system.mode: DEMO_PAPER_TRADING`;
 - broker desconectado y sin configuración operativa de broker;
@@ -468,24 +474,39 @@ El preflight de Fase 11 revisa, antes de ejecutar el piloto:
 - `decision_agent` y `audit_agent` reales deshabilitados;
 - LLM real deshabilitado salvo `--allow-real-llm` explícito;
 - proveedor de datos configurado y soportado;
-- CSV manual presente si se exige con `--require-manual-csv` o si el proveedor es `manual_csv`;
+- CSV manual presente si se exige con `--require-manual-csv`, si `controlled_pilot_data_policy.require_manual_csv_for_controlled_pilot=true` o si el proveedor es `manual_csv`;
 - columnas mínimas de CSV manual: `ticker`, `date`, `close`, `volume`, `currency`, `source`;
-- tickers invertibles esperados presentes en el CSV manual cuando el CSV es requerido;
-- benchmarks presentes o advertidos;
+- cobertura mínima de la muestra chica de activos invertibles;
+- que `close` y `volume` del CSV manual sean numéricos positivos;
+- benchmarks presentes según la política configurada;
+- accesibilidad del proveedor online solo si se pide con `--probe-data-provider` o si `controlled_pilot_data_policy.allow_online_provider_probe=true`;
+- errores de proveedor visibles en `provider_probe_errors`;
 - universo controlado pequeño;
 - `config/config_demo.yaml` solo leído, no modificado automáticamente;
 - benchmarks fuera del scoring.
 
+### Política de datos de Fase 11B
+
+La sección `controlled_pilot_data_policy` de `config/config_demo.yaml` controla el comportamiento del preflight:
+
+- `require_manual_csv_for_controlled_pilot`: si es `true`, falta de CSV manual = `FAIL`.
+- `allow_online_provider_probe`: si es `true`, el preflight prueba Stooq sobre pocos tickers invertibles, no sobre `broad_market`.
+- `minimum_preflight_data_coverage_pct`: umbral mínimo de cobertura invertible.
+- `partial_coverage_below_threshold_status`: define si cobertura parcial bajo umbral queda como `WARNING` o `FAIL`.
+- `required_benchmarks_policy`: `required` bloquea si falta benchmark, `warning` advierte, `ignore` no bloquea.
+
+Los benchmarks se validan como benchmarks y no se mezclan con los activos invertibles ni entran al scoring.
+
 ### Cómo interpretar PASS/WARNING/FAIL
 
-- **PASS:** todas las validaciones operativas pasaron. El controlled pilot ejecuta internamente:
+- **PASS:** todas las validaciones operativas y de data readiness pasaron. El controlled pilot ejecuta internamente:
 
   ```bash
   python scripts/run_real_data_pilot.py --date <fecha> --activate-real-data-pilot
   ```
 
-- **WARNING:** no hay bloqueo duro, pero hay advertencias visibles, por ejemplo benchmark faltante. No ejecuta por default. Solo ejecuta si se pasa `--allow-warning-run`.
-- **FAIL:** existe un bloqueo de seguridad u operativo. No ejecuta el piloto. Se debe corregir la causa y repetir.
+- **WARNING:** no hay bloqueo duro, pero hay advertencias visibles, por ejemplo cobertura parcial por debajo del umbral si la política lo permite o benchmark faltante con política `warning`. No ejecuta por default. Solo ejecuta si se pasa `--allow-warning-run`.
+- **FAIL:** existe un bloqueo de seguridad, operativo o de datos. Ejemplos: no hay datos para ningún activo invertible, falta CSV manual requerido, faltan columnas mínimas, `close`/`volume` no parsean o faltan benchmarks con política `required`. No ejecuta el piloto.
 
 ### Reportes generados
 
@@ -504,7 +525,7 @@ run_control_report.json
 run_control_report.md
 ```
 
-El `preflight_report` muestra checks individuales PASS/WARNING/FAIL. El `run_control_report` consolida estado de preflight, estado del piloto, cobertura de datos, warnings, errores, outputs generados, confirmación de seguridad y recomendación de siguiente acción.
+El `preflight_report` muestra checks individuales PASS/WARNING/FAIL e incluye `data_readiness_status`, cobertura de activos invertibles, cobertura de benchmarks, proveedor usado o probado, CSV manual detectado/faltante, columnas faltantes, tickers faltantes, `provider_probe_errors` y una explicación humana. El `run_control_report` incorpora el resultado `data_readiness`, consolida estado de preflight, estado del piloto, cobertura de datos, warnings, errores, outputs generados, confirmación de seguridad y recomendación de siguiente acción.
 
 ### Qué hacer si falta CSV
 
@@ -512,7 +533,7 @@ Si se ejecuta con `--require-manual-csv` y falta el archivo esperado, el preflig
 
 ### Qué hacer si falta cobertura
 
-Si falta cobertura de activos o benchmarks, revisar `preflight_report.*`, `run_control_report.*`, `real_data_pilot_report.*`, `data_quality_report.json` y los logs de la corrida. La Fase 11 permite continuar con warnings solo con `--allow-warning-run`; no amplía automáticamente a `broad_market`, no inventa precios y no mezcla benchmarks con activos invertibles.
+Si falta cobertura de activos o benchmarks, revisar `preflight_report.*`, `run_control_report.*`, `real_data_pilot_report.*`, `data_quality_report.json` y los logs de la corrida. La Fase 11B permite continuar con warnings solo con `--allow-warning-run`; no amplía automáticamente a `broad_market`, no inventa precios y no mezcla benchmarks con activos invertibles. Si el proveedor online falla, el error queda visible en `data_readiness.provider_probe_errors`.
 
 ### Límites explícitos de Fase 11
 
