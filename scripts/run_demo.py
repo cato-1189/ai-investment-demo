@@ -197,6 +197,78 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
 
 
 
+
+
+def asset_identity(asset: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ticker": asset.get("ticker"),
+        "name": asset.get("name") or asset.get("company") or asset.get("ticker"),
+        "country": asset.get("country", "US"),
+        "market": asset.get("market", asset.get("country", "US")),
+        "currency": asset.get("currency", "USD"),
+        "instrument_type": asset.get("instrument_type", "common_stock"),
+        "sector": asset.get("sector", "Unknown"),
+        "industry": asset.get("industry", "Unknown"),
+        "preferred_data_provider": asset.get("preferred_data_provider", "fixture"),
+        "eligible_for_investment": bool(asset.get("eligible_for_investment", False)),
+        "eligible_as_benchmark": bool(asset.get("eligible_as_benchmark", False)),
+        "min_liquidity_required_usd": asset.get("min_liquidity_required_usd", 1000000),
+        "notes": asset.get("notes", ""),
+    }
+
+
+def configured_universe_mode(config: dict[str, Any]) -> str:
+    modes = config.get("universe_modes", {})
+    return config.get("market_data", {}).get("universe_mode") or modes.get("default", "demo_small")
+
+
+def fixture_metadata_for_ticker(ticker: str) -> dict[str, Any]:
+    by_ticker = {a["ticker"]: a for a in read_json(FIXTURE_PATH, [])}
+    base = by_ticker.get(ticker, {"ticker": ticker, "company": ticker, "country": "US", "market": "US", "currency": "USD", "sector": "Unknown"})
+    country = base.get("country", "US")
+    instrument = "adr" if country in {"BR", "AR"} and base.get("market", "US") == "US" else "common_stock"
+    defaults = {"price_close": 100.0, "avg_volume_usd": 5000000, "data_quality": "MEDIUM", "metrics": {"pe_ttm": 15.0, "ev_ebitda": 9.0, "fcf_yield": 0.04, "roe": 0.10, "revenue_growth": 0.04, "net_debt_ebitda": 2.0, "momentum_6m": 0.0, "drawdown_52w": -0.10}}
+    return {**defaults, **base, "name": base.get("company", ticker), "instrument_type": instrument, "industry": base.get("industry", "Unknown"), "preferred_data_provider": "fixture", "eligible_for_investment": True, "eligible_as_benchmark": False, "min_liquidity_required_usd": 1000000, "notes": "Cargado desde fixture para modo de universo ampliado."}
+
+
+def resolve_universes(config: dict[str, Any]) -> dict[str, Any]:
+    mode = configured_universe_mode(config)
+    mode_cfg = config.get("universe_modes", {}).get(mode, {})
+    symbols = mode_cfg.get("symbols", [])
+    allowed = set(config.get("allowed_instrument_types", []))
+    investable_cfg = {a["ticker"]: a for a in config.get("investable_universe", [])}
+    benchmark_cfg = {a["ticker"]: a for a in config.get("benchmark_universe", [])}
+    excluded_cfg = {a["ticker"]: a for a in config.get("excluded_symbols", [])}
+    investable, blocked = [], []
+    for ticker in symbols:
+        if ticker in excluded_cfg:
+            blocked.append({**asset_identity(excluded_cfg[ticker]), "block_reason": "excluded_symbol"})
+            continue
+        if ticker in benchmark_cfg and not benchmark_cfg[ticker].get("eligible_for_investment", False):
+            blocked.append({**asset_identity(benchmark_cfg[ticker]), "block_reason": "benchmark_not_investable"})
+            continue
+        meta = investable_cfg.get(ticker) or fixture_metadata_for_ticker(ticker)
+        ident = asset_identity(meta)
+        if ticker in benchmark_cfg and not ident["eligible_for_investment"]:
+            blocked.append({**asset_identity(benchmark_cfg[ticker]), "block_reason": "benchmark_not_investable"})
+        elif not ident["eligible_for_investment"]:
+            blocked.append({**ident, "block_reason": "not_eligible_for_investment"})
+        elif ident["instrument_type"] not in allowed:
+            blocked.append({**ident, "block_reason": "instrument_type_not_allowed"})
+        else:
+            investable.append(ident)
+    benchmarks = [asset_identity(a) for a in config.get("benchmark_universe", []) if a.get("eligible_as_benchmark")]
+    excluded = [asset_identity(a) for a in config.get("excluded_symbols", [])] + blocked
+    return {"mode": mode, "investable": investable, "benchmarks": benchmarks, "excluded": excluded}
+
+
+def has_sufficient_data_for_scoring(asset: dict[str, Any], config: dict[str, Any]) -> bool:
+    order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    minimum = market_data_settings(config).get("min_quality_for_scoring", "MEDIUM")
+    required = ["price_close", "avg_volume_usd", "metrics"]
+    return all(asset.get(k) not in (None, {}) for k in required) and not asset.get("missing_fields") and order.get(asset.get("data_quality", "LOW"), 0) >= order.get(minimum, 1)
+
+
 class MarketDataProviderError(RuntimeError):
     """Error explícito de proveedor de datos de mercado."""
 
@@ -215,6 +287,8 @@ def market_data_settings(config: dict[str, Any]) -> dict[str, Any]:
         "providers": {},
     }
     settings = {**defaults, **config.get("market_data", {})}
+    if not settings.get("universe"):
+        settings["universe"] = resolve_universes(config)["investable"]
     if settings.get("mode") == "fixture":
         settings["enabled"] = False
     return settings
@@ -265,6 +339,7 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
         assets = []
         for asset in raw_payload["assets"]:
             cloned = json.loads(json.dumps(asset))
+            cloned["company"] = cloned.get("company") or cloned.get("name") or cloned.get("ticker")
             cloned.update({"data_source": "fixture", "as_of_date": today, "estimated_fields": [], "missing_fields": [], "provider_errors": []})
             assets.append(cloned)
         return assets, build_data_quality_report([], "pending", today, assets, raw_payload)
@@ -321,6 +396,11 @@ def load_market_data(config: dict[str, Any], today: str, run_id: str, log_path: 
     append_jsonl(log_path, {"event": "market_data_started", "run_id": run_id, "provider": provider, "mode": settings.get("mode")})
     try:
         raw = fixture_raw_payload(today) if provider == "fixture" else fetch_stooq_csv(settings.get("universe", []), today, int(settings.get("timeout_seconds", 20)))
+        if provider == "fixture":
+            wanted = {item["ticker"] for item in settings.get("universe", [])}
+            metadata = {item["ticker"]: item for item in settings.get("universe", [])}
+            fixture_assets = {asset.get("ticker"): asset for asset in raw.get("assets", [])}
+            raw["assets"] = [{**fixture_assets.get(ticker, fixture_metadata_for_ticker(ticker)), **metadata.get(ticker, {})} for ticker in wanted]
     except Exception as exc:
         append_jsonl(log_path, {"event": "market_data_provider_error", "run_id": run_id, "provider": provider, "error": str(exc)})
         if not settings.get("fallback_to_fixture"):
@@ -588,7 +668,15 @@ def parse_simple_yaml(text: str) -> dict[str, Any]:
         if stripped.startswith("- "):
             if not isinstance(parent, list):
                 raise ValueError(f"Lista YAML inesperada cerca de: {stripped}")
-            parent.append(parse_scalar(stripped[2:]))
+            item_text = stripped[2:].strip()
+            if ":" in item_text and not (item_text.startswith("'") or item_text.startswith("\"")):
+                item_key, item_sep, item_value = item_text.partition(":")
+                item: dict[str, Any] = {}
+                item[item_key.strip()] = parse_scalar(item_value.strip()) if item_value.strip() else {}
+                parent.append(item)
+                stack.append((indent, item))
+            else:
+                parent.append(parse_scalar(item_text))
             continue
         key, sep, value = stripped.partition(":")
         if not sep:
@@ -1058,6 +1146,21 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
             writer.writerow({field: row.get(field) for field in fields})
 
 
+
+def write_universe_snapshots(out_root: Path, universes: dict[str, Any]) -> dict[str, str]:
+    fields = ["ticker", "name", "country", "market", "currency", "instrument_type", "sector", "industry", "preferred_data_provider", "eligible_for_investment", "eligible_as_benchmark", "min_liquidity_required_usd", "notes", "block_reason"]
+    outputs = {
+        "investable_universe_snapshot": universes["investable"],
+        "benchmark_universe_snapshot": universes["benchmarks"],
+        "excluded_universe_snapshot": universes["excluded"],
+    }
+    paths = {}
+    for name, rows in outputs.items():
+        write_json(out_root / f"{name}.json", rows)
+        write_csv(out_root / f"{name}.csv", rows, fields)
+        paths[name] = str((out_root / f"{name}.json").relative_to(ROOT))
+    return paths
+
 def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any], validation_report: dict[str, Any], performance: dict[str, Any] | None = None) -> None:
     lines = [
         f"# Reporte diario DEMO - {today}",
@@ -1143,7 +1246,7 @@ def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: 
         if estimated_fields:
             alerts.append("ESTIMATED_FIELDS")
             estimated.append({"ticker": asset["ticker"], "fields": estimated_fields})
-        if quality == "LOW" or missing_fields:
+        if quality == "LOW" or missing_fields or not has_sufficient_data_for_scoring(asset, {"market_data": {"min_quality_for_scoring": "MEDIUM"}}):
             blocked.append(asset["ticker"])
         if alerts:
             flagged.append({"ticker": asset["ticker"], "alerts": sorted(set(alerts))})
@@ -1162,6 +1265,11 @@ def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: 
         "estimated_data": estimated,
         "provider_errors": provider_errors,
         "blocked_assets": sorted(set(blocked)),
+        "investable_assets_with_sufficient_data": sorted(set(complete) - set(blocked)),
+        "investable_assets_blocked": sorted(set(blocked)),
+        "benchmarks_available": [],
+        "benchmarks_missing": [],
+        "excluded_symbols": [],
         "data_timestamp_utc": (raw_payload or {}).get("fetched_at", utc_now().isoformat()),
     }
 
@@ -1235,8 +1343,12 @@ def main() -> int:
 
     memory = ensure_memory(config, run_id, today)
     portfolio = load_portfolio(config)
+    universes = resolve_universes(config)
+    universe_snapshot_paths = write_universe_snapshots(out_root, universes)
     assets, data_quality_report, snapshot_paths = load_market_data(config, today, run_id, log_path, out_root)
-    scored = sorted([score_asset(asset, config["scoring_weights"]) for asset in assets], key=lambda row: row["total_score"], reverse=True)
+    eligible_tickers = {item["ticker"] for item in universes["investable"]}
+    scoring_assets = [asset for asset in assets if asset.get("ticker") in eligible_tickers and has_sufficient_data_for_scoring(asset, config)]
+    scored = sorted([score_asset(asset, config["scoring_weights"]) for asset in scoring_assets], key=lambda row: row["total_score"], reverse=True)
     candidates = scored[: config["candidate_filters"]["max_candidates_for_decision"]]
     research_outputs = [mock_research(asset, today) for asset in candidates]
     decisions = [mock_decision(asset, config, today) for asset in candidates]
@@ -1249,7 +1361,14 @@ def main() -> int:
     persist_performance_outputs(out_root, config, performance, decision_tracking)
     quality_provider = "fixture" if data_quality_report["source"] == "local_fixture" else data_quality_report["source"]
     data_quality_report = build_data_quality_report(scored, run_id, today, scored, {"provider": quality_provider, "fetched_at": data_quality_report.get("data_timestamp_utc"), "errors": data_quality_report.get("provider_errors", [])})
-    data_quality_report["snapshot_paths"] = snapshot_paths
+    data_quality_report["snapshot_paths"] = {**snapshot_paths, **universe_snapshot_paths}
+    bench_tickers = {b["ticker"] for b in universes["benchmarks"]}
+    benchmark_available = {r["ticker"] for r in performance.get("benchmarks", []) if not r.get("missing_data")}
+    data_quality_report["benchmarks_available"] = sorted(benchmark_available)
+    data_quality_report["benchmarks_missing"] = sorted(bench_tickers - benchmark_available)
+    data_quality_report["excluded_symbols"] = sorted({e["ticker"] for e in universes["excluded"]})
+    data_quality_report["investable_assets_with_sufficient_data"] = sorted({a["ticker"] for a in scoring_assets})
+    data_quality_report["investable_assets_blocked"] = sorted(eligible_tickers - {a["ticker"] for a in scoring_assets})
     memory_update = build_memory_update(run_id, today, decisions, audits, finals)
     memory_diff = update_external_memory(config, run_id, today, memory, scored, decisions, audits, finals, portfolio, data_quality_report)
     context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root)
@@ -1304,6 +1423,7 @@ def main() -> int:
     print(f"Reporte: {(out_root / 'daily_report.md').relative_to(ROOT)}")
     print(f"Memory diff: {(out_root / 'memory_diff.md').relative_to(ROOT)}")
     print(f"Performance: {(out_root / 'performance_report.md').relative_to(ROOT)}")
+    print(f"Universo: modo={universes['mode']} snapshots={universe_snapshot_paths['investable_universe_snapshot']}")
     print(f"Context packs: {(out_root / 'context_packs').relative_to(ROOT)}")
     return 0
 

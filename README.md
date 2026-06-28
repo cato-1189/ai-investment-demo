@@ -1,6 +1,6 @@
 # AI Investment Demo
 
-Sistema DEMO de inversión autónoma en modo paper trading. La Fase 5 agrega ingesta controlada de datos de cierre para un universo acotado, con snapshots auditables, data quality report, fallback a fixtures y bloqueo por baja calidad. El sistema sigue sin broker, sin órdenes reales, sin automatización diaria y con `decision_agent`/`audit_agent` reales deshabilitados.
+Sistema DEMO de inversión autónoma en modo paper trading. La Fase 6B separa formalmente el universo invertible de los benchmarks, mantiene ingesta controlada de datos de cierre, snapshots auditables, data quality report, fallback a fixtures y bloqueo por baja calidad. El sistema sigue sin broker, sin órdenes reales, sin automatización diaria y con `decision_agent`/`audit_agent` reales deshabilitados.
 
 ## Ejecutar en modo fixture recomendado
 
@@ -52,15 +52,29 @@ python scripts/run_demo.py --date 2026-06-27
 
 `stooq_csv` no requiere API key. Si el proveedor falla, el error se registra en logs; si `fallback_to_fixture: true`, la corrida vuelve a fixtures y lo marca claramente como fixture/mock. Si se desactiva el fallback, el error del proveedor bloquea la corrida.
 
-## Universo inicial editable
+## Universo invertible vs benchmarks (Fase 6B)
 
-La configuración deja un universo acotado y editable en `market_data.universe`:
+El objetivo del sistema es buscar acciones subvaluadas de EEUU, Brasil y Argentina. Por eso la configuración separa tres listas editables en `config/config_demo.yaml`:
 
-- Acciones líquidas de EEUU: `AAPL`, `MSFT`, `NVDA`, `AMZN`, `GOOGL`, `META`, `JPM`, `XOM`, `KO`, `WMT`.
-- ADRs argentinos principales: `MELI`, `YPF`, `GGAL`, `BMA`, `PAM`.
-- Brasil/ETFs vinculados: `VALE`, `PBR`, `ITUB`, `BBD`, `ABEV`, `EWZ`, `BRZU`.
+- `investable_universe`: acciones comunes, ADRs, CEDEARs u otros instrumentos accionarios habilitados para análisis.
+- `benchmark_universe`: ETFs/proxies como `SPY`, `QQQ`, `EWZ`, `ARGT` y `BIL`, usados solo para comparar performance.
+- `excluded_symbols`: instrumentos que no deben entrar al scoring, por ejemplo ETFs apalancados o símbolos fuera de alcance.
 
-El usuario puede editar esa lista sin tocar código. En Fase 5 los fundamentals no provistos por el proveedor quedan marcados como `estimated_fields`; no se inventan como datos reales.
+Cada activo incluye ticker, nombre, país, mercado, moneda, tipo de instrumento, sector, industria, proveedor preferido, elegibilidad como inversión, elegibilidad como benchmark, liquidez mínima y notas. Los tipos permitidos por default están en `allowed_instrument_types`: `common_stock`, `adr` y `cedear`.
+
+### Modos de universo
+
+`market_data.universe_mode` queda en `demo_small` por default para no romper la demo:
+
+- `demo_small`: universo reducido para pruebas sin credenciales.
+- `liquid_core`: universo líquido ampliado de EEUU, Brasil y Argentina.
+- `broad_market`: universo amplio configurable, sin intentar cargar automáticamente “todo el mercado”.
+
+Para ampliar el universo sin tocar código, un humano edita `config/config_demo.yaml`: agrega o ajusta activos en `investable_universe` y suma sus tickers al modo deseado dentro de `universe_modes`. Para correr un modo más grande, cambiar `market_data.universe_mode: "liquid_core"` o `"broad_market"`.
+
+### Protección contra benchmarks como candidatos
+
+Por default `SPY`, `QQQ`, `EWZ`, `ARGT` y `BIL` tienen `eligible_for_investment: false` y `eligible_as_benchmark: true`. Si accidentalmente aparecen en un modo de universo, quedan bloqueados como no invertibles y no pasan al scoring. Solo podrían ser candidatos si un humano cambia explícitamente su metadata para permitir inversión, lo cual no es el default de Fase 6B.
 
 ## Snapshots auditables
 
@@ -70,6 +84,14 @@ Cada corrida escribe snapshots en dos lugares:
 data/snapshots/<YYYY-MM-DD>/<run_id>/raw_market_data.json
  data/snapshots/<YYYY-MM-DD>/<run_id>/normalized_market_data.json
  data/snapshots/<YYYY-MM-DD>/<run_id>/data_quality_report.json
+```
+
+La carpeta de outputs de cada corrida agrega:
+
+```text
+outputs/daily_runs/<YYYY-MM-DD>/<run_id>/investable_universe_snapshot.csv/json
+outputs/daily_runs/<YYYY-MM-DD>/<run_id>/benchmark_universe_snapshot.csv/json
+outputs/daily_runs/<YYYY-MM-DD>/<run_id>/excluded_universe_snapshot.csv/json
 ```
 
 También copia snapshots de la corrida dentro de:
@@ -82,11 +104,14 @@ outputs/daily_runs/<YYYY-MM-DD>/<run_id>/snapshots/
 
 `data_quality_report.json` identifica:
 
-- activos completos;
+- activos invertibles con datos suficientes;
+- activos invertibles bloqueados por baja calidad o datos insuficientes;
+- benchmarks disponibles para comparación;
+- benchmarks faltantes sin inventar datos;
+- símbolos excluidos;
 - datos faltantes por campo;
 - datos estimados;
 - errores por proveedor;
-- activos bloqueados;
 - timestamp UTC de datos;
 - si se usaron fuentes externas.
 
@@ -123,7 +148,7 @@ La Fase 5 mantiene:
 - **Aparecen activos bloqueados:** revisar `blocked_assets`, `missing_data` y las reglas `risk_rules.block_if_data_quality_low`.
 - **Necesito volver al modo seguro:** restaurar `market_data.mode: "fixture"`, `enabled: false`, `provider: "fixture"`.
 
-## Limitaciones de Fase 5
+## Limitaciones de Fase 6B
 
 - No hay automatización diaria.
 - No hay broker ni órdenes reales.
@@ -132,6 +157,6 @@ La Fase 5 mantiene:
 - El proveedor real preparado es CSV público de Stooq; no todos los tickers/fundamentals pueden estar disponibles.
 - Los fundamentals básicos se usan solo si el proveedor los entrega; si no, quedan marcados como estimados o faltantes.
 
-## Para Fase 6
+## Para Fase 7
 
-Fase 6 debería definir si se incorpora un proveedor pago/robusto de fundamentals, ampliar normalización multi-mercado, mejorar controles de moneda/FX, decidir si research cualitativo usa datos reales enriquecidos y diseñar revisión humana antes de cualquier paso hacia automatización. Broker y órdenes reales siguen fuera de alcance hasta aprobación explícita futura.
+Fase 7 debería definir si se incorpora un proveedor pago/robusto de fundamentals, ampliar normalización multi-mercado, mejorar controles de moneda/FX, decidir si research cualitativo usa datos reales enriquecidos y diseñar revisión humana antes de cualquier paso hacia automatización. Broker, órdenes reales, decision_agent real y audit_agent real siguen fuera de alcance hasta aprobación explícita futura.

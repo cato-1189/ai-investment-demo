@@ -38,29 +38,8 @@ market_data:
   min_quality_for_scoring: "MEDIUM"
   snapshot_folder: "data/snapshots"
   timeout_seconds: 20
-  universe:
-    - "AAPL"
-    - "MSFT"
-    - "NVDA"
-    - "AMZN"
-    - "GOOGL"
-    - "META"
-    - "JPM"
-    - "XOM"
-    - "KO"
-    - "WMT"
-    - "MELI"
-    - "YPF"
-    - "GGAL"
-    - "BMA"
-    - "PAM"
-    - "VALE"
-    - "PBR"
-    - "ITUB"
-    - "BBD"
-    - "ABEV"
-    - "EWZ"
-    - "BRZU"
+  universe_mode: "demo_small"
+  universe: []  # Compatibilidad legacy; Fase 6B usa universe_modes.<modo>.
   providers:
     stooq_csv:
       requires_api_key: false
@@ -336,3 +315,183 @@ context_management:
     prevent_duplicate_memory_items: true
     require_memory_diff_report: true
     require_human_readable_memory_summary: true
+
+# Fase 6B: separación formal entre universo invertible, benchmarks y exclusiones.
+allowed_instrument_types:
+  - "common_stock"
+  - "adr"
+  - "cedear"
+
+excluded_symbols:
+  - ticker: "BRZU"
+    name: "Direxion Daily MSCI Brazil Bull 2X Shares"
+    country: "US"
+    market: "NYSEARCA"
+    currency: "USD"
+    instrument_type: "etf"
+    sector: "ETF"
+    industry: "Leveraged ETF"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: false
+    eligible_as_benchmark: false
+    min_liquidity_required_usd: 1000000
+    notes: "Excluido por ser ETF apalancado; no es acción subvaluada candidata."
+
+benchmark_universe:
+  - ticker: "SPY"
+    name: "SPDR S&P 500 ETF Trust"
+    country: "US"
+    market: "NYSEARCA"
+    currency: "USD"
+    instrument_type: "benchmark"
+    sector: "Benchmark"
+    industry: "US broad market ETF"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: false
+    eligible_as_benchmark: true
+    min_liquidity_required_usd: 1000000
+    notes: "Benchmark de EEUU; no candidato de inversión por default."
+  - ticker: "QQQ"
+    name: "Invesco QQQ Trust"
+    country: "US"
+    market: "NASDAQ"
+    currency: "USD"
+    instrument_type: "benchmark"
+    sector: "Benchmark"
+    industry: "US technology ETF"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: false
+    eligible_as_benchmark: true
+    min_liquidity_required_usd: 1000000
+    notes: "Benchmark tecnológico; no candidato de inversión por default."
+  - ticker: "EWZ"
+    name: "iShares MSCI Brazil ETF"
+    country: "BR"
+    market: "NYSEARCA"
+    currency: "USD"
+    instrument_type: "benchmark"
+    sector: "Benchmark"
+    industry: "Brazil country ETF"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: false
+    eligible_as_benchmark: true
+    min_liquidity_required_usd: 1000000
+    notes: "Benchmark Brasil; no candidato de inversión por default."
+  - ticker: "ARGT"
+    name: "Global X MSCI Argentina ETF"
+    country: "AR"
+    market: "NYSEARCA"
+    currency: "USD"
+    instrument_type: "benchmark"
+    sector: "Benchmark"
+    industry: "Argentina country ETF"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: false
+    eligible_as_benchmark: true
+    min_liquidity_required_usd: 1000000
+    notes: "Benchmark Argentina; no candidato de inversión por default."
+  - ticker: "BIL"
+    name: "SPDR Bloomberg 1-3 Month T-Bill ETF"
+    country: "US"
+    market: "NYSEARCA"
+    currency: "USD"
+    instrument_type: "cash_proxy"
+    sector: "Cash"
+    industry: "Treasury bill ETF"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: false
+    eligible_as_benchmark: true
+    min_liquidity_required_usd: 1000000
+    notes: "Proxy de cash; solo comparación."
+
+investable_universe:
+  - ticker: "AAPL"
+    name: "Apple Inc."
+    country: "US"
+    market: "NASDAQ"
+    currency: "USD"
+    instrument_type: "common_stock"
+    sector: "Technology"
+    industry: "Consumer Electronics"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: true
+    eligible_as_benchmark: false
+    min_liquidity_required_usd: 1000000
+    notes: "Acción líquida EEUU para demo_small."
+  - ticker: "MSFT"
+    name: "Microsoft Corporation"
+    country: "US"
+    market: "NASDAQ"
+    currency: "USD"
+    instrument_type: "common_stock"
+    sector: "Technology"
+    industry: "Software"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: true
+    eligible_as_benchmark: false
+    min_liquidity_required_usd: 1000000
+    notes: "Acción líquida EEUU para demo_small."
+  - ticker: "MELI"
+    name: "MercadoLibre, Inc."
+    country: "AR"
+    market: "NASDAQ"
+    currency: "USD"
+    instrument_type: "common_stock"
+    sector: "Consumer Discretionary"
+    industry: "Internet Retail"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: true
+    eligible_as_benchmark: false
+    min_liquidity_required_usd: 1000000
+    notes: "Exposición LatAm/Argentina listada en EEUU."
+  - ticker: "YPF"
+    name: "YPF Sociedad Anónima ADR"
+    country: "AR"
+    market: "NYSE"
+    currency: "USD"
+    instrument_type: "adr"
+    sector: "Energy"
+    industry: "Oil & Gas Integrated"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: true
+    eligible_as_benchmark: false
+    min_liquidity_required_usd: 1000000
+    notes: "ADR argentino."
+  - ticker: "VALE"
+    name: "Vale S.A. ADR"
+    country: "BR"
+    market: "NYSE"
+    currency: "USD"
+    instrument_type: "adr"
+    sector: "Materials"
+    industry: "Iron Ore"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: true
+    eligible_as_benchmark: false
+    min_liquidity_required_usd: 1000000
+    notes: "ADR brasileño."
+  - ticker: "PBR"
+    name: "Petróleo Brasileiro S.A. Petrobras ADR"
+    country: "BR"
+    market: "NYSE"
+    currency: "USD"
+    instrument_type: "adr"
+    sector: "Energy"
+    industry: "Oil & Gas Integrated"
+    preferred_data_provider: "fixture"
+    eligible_for_investment: true
+    eligible_as_benchmark: false
+    min_liquidity_required_usd: 1000000
+    notes: "ADR brasileño."
+
+universe_modes:
+  default: "demo_small"
+  demo_small:
+    description: "Universo reducido para pruebas DEMO sin credenciales."
+    symbols: ["AAPL", "MSFT", "MELI", "YPF", "VALE", "PBR"]
+  liquid_core:
+    description: "Universo líquido ampliado EEUU, Brasil y Argentina."
+    symbols: ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "JPM", "XOM", "KO", "WMT", "MELI", "YPF", "GGAL", "BMA", "PAM", "VALE", "PBR", "ITUB", "BBD", "ABEV"]
+  broad_market:
+    description: "Universo amplio configurable; agregar símbolos aquí y metadatos en investable_universe."
+    symbols: ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "JPM", "XOM", "KO", "WMT", "MELI", "YPF", "GGAL", "BMA", "PAM", "VALE", "PBR", "ITUB", "BBD", "ABEV"]
