@@ -270,6 +270,10 @@ context_management:
     data_quality_memory: "memory/data_quality_memory.md"
     human_overrides: "memory/human_overrides.md"
     config_change_log: "memory/config_change_log.md"
+  human_review_files:
+    queue: "memory/human_review_queue.jsonl"
+    decisions: "memory/human_review_decisions.jsonl"
+    versions: "memory/methodology_versions.jsonl"
   memory_update_rules:
     update_after_each_run: true
     update_after_config_change: true

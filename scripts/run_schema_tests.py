@@ -362,5 +362,66 @@ class Phase6CUniverseBuilderTests(unittest.TestCase):
         self.assertEqual(len(candidates), 2)
 
 
+class Phase8HumanReviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = run_demo.load_config()
+        self.today = "2026-06-27"
+        self.forward = {"status": "NO_EXPIRED_WINDOWS", "metrics": {"expired_windows": 0, "evaluable_decisions": 0, "not_evaluable": 0, "hit_rate": None, "blocked_would_have_worked": 0}, "rows": []}
+
+    def _config_for_tmp(self, tmp: Path) -> dict:
+        config = dict(self.config)
+        context = dict(self.config["context_management"])
+        context["human_review_files"] = {"queue": str(tmp / "queue.jsonl"), "decisions": str(tmp / "decisions.jsonl"), "versions": str(tmp / "versions.jsonl")}
+        memory_files = dict(context["memory_files"])
+        memory_files["methodology_state"] = str(tmp / "methodology_state.md")
+        memory_files["postmortem_memory"] = str(tmp / "postmortem_memory.md")
+        context["memory_files"] = memory_files
+        config["context_management"] = context
+        (tmp / "methodology_state.md").write_text("# Methodology\n", encoding="utf-8")
+        (tmp / "postmortem_memory.md").write_text("# Postmortem\n", encoding="utf-8")
+        return config
+
+    def test_create_pending_and_no_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config_for_tmp(tmp)
+            out = tmp / "out"; out.mkdir()
+            first = run_demo.sync_human_review(config, out, "run", self.today, self.forward)
+            second = run_demo.sync_human_review(config, out, "run", self.today, self.forward)
+            self.assertGreater(first["new_recommendations"], 0)
+            self.assertEqual(second["new_recommendations"], 0)
+            self.assertEqual(first["counts"]["PENDING"], second["counts"]["PENDING"])
+
+    def test_approve_reject_generate_proposal_and_version_without_config_change(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config_for_tmp(tmp)
+            out = tmp / "out"; out.mkdir()
+            run_demo.sync_human_review(config, out, "run", self.today, self.forward)
+            queue = run_demo.read_jsonl(tmp / "queue.jsonl")
+            before_config = (ROOT / "config/config_demo.yaml").read_text(encoding="utf-8")
+            run_demo.append_jsonl(tmp / "decisions.jsonl", {"recommendation_id": queue[0]["recommendation_id"], "status": "APPROVED", "human_comment": "ok", "decision_date": self.today})
+            run_demo.append_jsonl(tmp / "decisions.jsonl", {"recommendation_id": queue[1]["recommendation_id"], "status": "REJECTED", "human_comment": "muestra insuficiente", "decision_date": self.today})
+            review = run_demo.sync_human_review(config, out, "run", self.today, self.forward)
+            proposal = run_demo.read_json(out / "proposed_methodology_changes.json")
+            self.assertEqual(review["counts"]["APPROVED"], 1)
+            self.assertEqual(review["counts"]["REJECTED"], 1)
+            self.assertTrue(proposal["approved_recommendations"])
+            self.assertTrue((tmp / "versions.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(before_config, (ROOT / "config/config_demo.yaml").read_text(encoding="utf-8"))
+
+    def test_runs_without_recommendations_and_safety_flags(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp_name:
+            tmp = Path(tmp_name)
+            config = self._config_for_tmp(tmp)
+            out = tmp / "out"; out.mkdir()
+            review = run_demo.sync_human_review(config, out, "run", self.today, {"status": "OK", "metrics": {}, "rows": []})
+            proposal = run_demo.read_json(out / "proposed_methodology_changes.json")
+            self.assertGreaterEqual(review["counts"]["PENDING"], 0)
+            self.assertFalse(proposal["broker_connected"])
+            self.assertFalse(proposal["real_order"])
+            self.assertFalse(self.config["system"]["allow_real_orders"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
