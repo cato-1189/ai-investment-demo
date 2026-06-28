@@ -7,6 +7,7 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import shutil
 import time
@@ -34,6 +35,45 @@ PROMPT_KEYS = [
     "learning_agent",
 ]
 
+
+
+def is_missing_value(value: Any) -> bool:
+    """Detect missing values across Python, CSV, JSON and optional pandas/numpy scalars."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().upper() in {"", "N/A", "NA", "N/D", "NULL", "NONE", "NAN"}
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) == 0
+    try:
+        if isinstance(value, float) and math.isnan(value):
+            return True
+    except TypeError:
+        pass
+    try:
+        result = value != value  # catches numpy.nan without importing numpy
+        if isinstance(result, bool) and result:
+            return True
+    except Exception:
+        pass
+    try:
+        bool_value = bool(value)
+    except Exception:
+        bool_value = False
+    type_name = type(value).__name__
+    module_name = type(value).__module__
+    if type_name == "NAType" or (module_name.startswith("pandas") and not bool_value):
+        return True
+    return False
+
+
+def financial_field(value: Any, provider: str, timestamp: str, *, is_estimated: bool = False, quality_status: str | None = None) -> dict[str, Any]:
+    missing = is_missing_value(value)
+    return {"value": None if missing else value, "provider": provider, "timestamp": timestamp, "is_estimated": bool(is_estimated), "is_missing": missing, "quality_status": quality_status or ("MISSING" if missing else ("ESTIMATED" if is_estimated else "OK"))}
+
+
+def field_value(field: Any) -> Any:
+    return field.get("value") if isinstance(field, dict) and {"value", "provider"} <= set(field) else field
 
 def utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
@@ -460,11 +500,35 @@ def resolve_universes(config: dict[str, Any]) -> dict[str, Any]:
     excluded = [asset_identity(a) for a in config.get("excluded_symbols", [])] + blocked
     return {"mode": mode, "investable": investable, "benchmarks": benchmarks, "excluded": excluded, "catalog_assets_loaded": len(catalog_by_ticker), "filters": filters}
 
+def _coverage_for_category(asset: dict[str, Any], category: str) -> float:
+    data = asset.get(category) or {}
+    if not data:
+        return 1.0
+    total = len(data)
+    present = sum(1 for field in data.values() if not (isinstance(field, dict) and field.get("is_missing")) and not is_missing_value(field_value(field)))
+    return present / total if total else 0.0
+
+
 def has_sufficient_data_for_scoring(asset: dict[str, Any], config: dict[str, Any]) -> bool:
+    settings = market_data_settings(config)
     order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-    minimum = market_data_settings(config).get("min_quality_for_scoring", "MEDIUM")
-    required = ["price_close", "avg_volume_usd", "metrics"]
-    return all(asset.get(k) not in (None, {}) for k in required) and not asset.get("missing_fields") and order.get(asset.get("data_quality", "LOW"), 0) >= order.get(minimum, 1)
+    minimum = settings.get("min_quality_for_scoring", "MEDIUM")
+    required = settings.get("required_fields_for_scoring") or ["price_close", "avg_volume_usd", "metrics"]
+    required_ok = all(not is_missing_value(asset.get(k)) for k in required)
+    if settings.get("fail_if_required_financial_fields_missing", True) and (asset.get("missing_fields") or not required_ok):
+        return False
+    thresholds = {
+        "price_data": settings.get("minimum_price_coverage_pct", 0.0),
+        "fundamentals_data": settings.get("minimum_fundamentals_coverage_pct", 0.0),
+        "ratios_data": settings.get("minimum_ratios_coverage_pct", 0.0),
+    }
+    metadata_threshold = settings.get("minimum_metadata_coverage_pct")
+    if metadata_threshold is not None:
+        thresholds["metadata_data"] = metadata_threshold
+    for category, threshold in thresholds.items():
+        if threshold is not None and _coverage_for_category(asset, category) < float(threshold):
+            return False
+    return order.get(asset.get("data_quality", "LOW"), 0) >= order.get(minimum, 1)
 
 
 class MarketDataProviderError(RuntimeError):
@@ -476,8 +540,16 @@ def market_data_settings(config: dict[str, Any]) -> dict[str, Any]:
         "mode": "fixture",
         "enabled": False,
         "provider": "fixture",
+        "financial_data_providers": ["fixture", "stooq_csv", "manual_csv"],
         "provider_priority": ["stooq_csv", "manual_csv"],
+        "enable_yfinance_provider": False,
         "minimum_real_data_coverage_pct": 0.60,
+        "minimum_price_coverage_pct": 0.60,
+        "minimum_fundamentals_coverage_pct": 0.0,
+        "minimum_ratios_coverage_pct": 0.0,
+        "minimum_metadata_coverage_pct": None,
+        "required_fields_for_scoring": ["price_close", "avg_volume_usd", "metrics"],
+        "fail_if_required_financial_fields_missing": True,
         "allow_manual_csv_fallback": False,
         "manual_csv_path": "data/manual_market_data/{date}/market_data.csv",
         "fail_if_no_real_prices": True,
@@ -507,12 +579,16 @@ def validate_market_data_safety(config: dict[str, Any]) -> list[str]:
         errors.append("market_data.mode=real requiere market_data.enabled=true explícito")
     if settings.get("enabled") and settings.get("mode") != "real":
         errors.append("market_data.enabled=true requiere market_data.mode=real explícito")
-    supported = {"fixture", "stooq_csv", "manual_csv"}
+    supported = {"fixture", "stooq_csv", "manual_csv", "yfinance"}
     if settings.get("provider") not in supported:
         errors.append(f"market_data.provider no soportado: {settings.get('provider')}")
+    if settings.get("provider") == "yfinance" and not settings.get("enable_yfinance_provider"):
+        errors.append("market_data.provider=yfinance requiere enable_yfinance_provider=true; provider fuerza ese proveedor y no significa prioridad")
     for provider in settings.get("provider_priority", []):
         if provider not in supported - {"fixture"}:
             errors.append(f"market_data.provider_priority contiene proveedor no soportado: {provider}")
+        if provider == "yfinance" and not settings.get("enable_yfinance_provider"):
+            errors.append("provider_priority contiene yfinance pero enable_yfinance_provider=false")
     if settings.get("mode") == "real" and "manual_csv" in settings.get("provider_priority", []) and not settings.get("allow_manual_csv_fallback"):
         errors.append("manual_csv en provider_priority requiere allow_manual_csv_fallback=true")
     return errors
@@ -579,17 +655,71 @@ def fetch_manual_csv(universe: list[dict[str, Any]], today: str, settings: dict[
     return {"provider": "manual_csv", "as_of_date": today, "fetched_at": utc_now().isoformat(), "path": str(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path), "assets": rows, "errors": errors}
 
 
+
+def _first_statement_value(frame: Any, labels: list[str]) -> Any:
+    if frame is None or is_missing_value(frame):
+        return None
+    try:
+        for label in labels:
+            if label in frame.index:
+                series = frame.loc[label]
+                for value in list(series):
+                    if not is_missing_value(value):
+                        return float(value)
+    except Exception:
+        return None
+    return None
+
+
+def fetch_yfinance(universe: list[dict[str, Any]], today: str, settings: dict[str, Any]) -> dict[str, Any]:
+    try:
+        import yfinance as yf  # type: ignore
+    except ModuleNotFoundError as exc:
+        return {"provider": "yfinance", "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": [], "errors": [{"provider": "yfinance", "error": "yfinance no instalado; instale el paquete o use fallback manual_csv", "exception": exc.__class__.__name__}]}
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    timeout = int(settings.get("timeout_seconds", 20))
+    for item in universe:
+        ticker = item["ticker"] if isinstance(item, dict) else str(item)
+        try:
+            tk = yf.Ticker(ticker)
+            hist = tk.history(period="5d", interval="1d", timeout=timeout)
+            info = tk.get_info() if hasattr(tk, "get_info") else getattr(tk, "info", {})
+            last = hist.dropna(how="all").tail(1) if hist is not None and not hist.empty else None
+            close = None if last is None else last["Close"].iloc[0]
+            volume = None if last is None else last["Volume"].iloc[0]
+            date_value = today if last is None else str(last.index[-1].date())
+            income = getattr(tk, "income_stmt", None)
+            balance = getattr(tk, "balance_sheet", None)
+            cashflow = getattr(tk, "cashflow", None)
+            total_revenue = _first_statement_value(income, ["Total Revenue", "Operating Revenue"])
+            net_income = _first_statement_value(income, ["Net Income", "Net Income Common Stockholders"])
+            equity = _first_statement_value(balance, ["Stockholders Equity", "Total Equity Gross Minority Interest"])
+            total_debt = _first_statement_value(balance, ["Total Debt", "Net Debt"])
+            fcf = _first_statement_value(cashflow, ["Free Cash Flow", "Operating Cash Flow"])
+            raw = {"Symbol": ticker, "Date": date_value, "Close": close, "Volume": volume, "Currency": (info or {}).get("currency"), "Source": "yfinance", "marketCap": (info or {}).get("marketCap"), "trailingPE": (info or {}).get("trailingPE"), "enterpriseToEbitda": (info or {}).get("enterpriseToEbitda"), "returnOnEquity": (info or {}).get("returnOnEquity"), "revenueGrowth": (info or {}).get("revenueGrowth"), "totalRevenue": total_revenue, "netIncome": net_income, "stockholdersEquity": equity, "totalDebt": total_debt, "freeCashFlow": fcf, "longName": (info or {}).get("longName"), "sector": (info or {}).get("sector"), "industry": (info or {}).get("industry")}
+            rows.append({"ticker": ticker, "provider": "yfinance", "provider_symbol": ticker, "raw": raw})
+        except Exception as exc:
+            errors.append({"ticker": ticker, "provider": "yfinance", "error": str(exc)})
+    return {"provider": "yfinance", "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": rows, "errors": errors}
+
 def fetch_real_multi_provider(universe: list[dict[str, Any]], today: str, settings: dict[str, Any]) -> dict[str, Any]:
     pending = list(universe)
     assets: list[dict[str, Any]] = []
     provider_errors: list[dict[str, Any]] = []
     provider_payloads: list[dict[str, Any]] = []
     coverage_by_provider: dict[str, list[str]] = {}
-    for provider in settings.get("provider_priority") or [settings.get("provider", "stooq_csv")]:
+    provider_sequence = [settings.get("provider")] if settings.get("provider") in {"yfinance", "manual_csv"} else (settings.get("provider_priority") or [settings.get("provider", "stooq_csv")])
+    for provider in provider_sequence:
         if provider == "manual_csv" and not settings.get("allow_manual_csv_fallback"):
             provider_errors.append({"provider": provider, "error": "fallback CSV manual no habilitado"})
             continue
-        payload = fetch_stooq_csv(pending, today, int(settings.get("timeout_seconds", 20))) if provider == "stooq_csv" else fetch_manual_csv(pending, today, settings)
+        if provider == "stooq_csv":
+            payload = fetch_stooq_csv(pending, today, int(settings.get("timeout_seconds", 20)))
+        elif provider == "yfinance":
+            payload = fetch_yfinance(pending, today, settings)
+        else:
+            payload = fetch_manual_csv(pending, today, settings)
         provider_payloads.append(payload)
         provider_errors.extend([{**e, "provider": e.get("provider", provider)} for e in payload.get("errors", [])])
         normalized, _ = normalize_market_data(payload, {"market_data": settings}, today)
@@ -602,7 +732,7 @@ def fetch_real_multi_provider(universe: list[dict[str, Any]], today: str, settin
     for item in pending:
         ticker = item["ticker"] if isinstance(item, dict) else str(item)
         provider_errors.append({"ticker": ticker, "provider": "multi_provider", "error": "sin datos válidos en proveedores configurados"})
-    return {"provider": "multi_provider", "provider_priority": settings.get("provider_priority"), "minimum_real_data_coverage_pct": settings.get("minimum_real_data_coverage_pct"), "fail_if_no_real_prices": settings.get("fail_if_no_real_prices"), "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": assets, "errors": provider_errors, "provider_payloads": provider_payloads, "coverage_by_provider": coverage_by_provider, "manual_csv_used": bool(coverage_by_provider.get("manual_csv"))}
+    return {"provider": settings.get("provider") if settings.get("provider") in {"yfinance", "manual_csv"} else "multi_provider", "provider_priority": provider_sequence, "minimum_real_data_coverage_pct": settings.get("minimum_real_data_coverage_pct"), "fail_if_no_real_prices": settings.get("fail_if_no_real_prices"), "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": assets, "errors": provider_errors, "provider_payloads": provider_payloads, "coverage_by_provider": coverage_by_provider, "manual_csv_used": bool(coverage_by_provider.get("manual_csv"))}
 
 def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], today: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if raw_payload["provider"] == "fixture":
@@ -610,6 +740,12 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
         for asset in raw_payload["assets"]:
             cloned = json.loads(json.dumps(asset))
             cloned["company"] = cloned.get("company") or cloned.get("name") or cloned.get("ticker")
+            ts = raw_payload.get("fetched_at", utc_now().isoformat())
+            cloned["price_data"] = {"price_close": financial_field(cloned.get("price_close"), "fixture", ts), "avg_volume_usd": financial_field(cloned.get("avg_volume_usd"), "fixture", ts)}
+            cloned["fundamentals_data"] = {}
+            cloned["ratios_data"] = {k: financial_field(v, "fixture", ts) for k, v in (cloned.get("metrics") or {}).items()}
+            cloned["metadata_data"] = {k: financial_field(cloned.get(k), "fixture", ts) for k in ["company", "sector", "industry", "country", "currency"]}
+            cloned["corporate_actions"] = {}
             cloned.update({"data_source": "fixture", "as_of_date": today, "estimated_fields": [], "missing_fields": [], "provider_errors": []})
             assets.append(cloned)
         return assets, build_data_quality_report([], "pending", today, assets, raw_payload)
@@ -626,12 +762,12 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
         close = raw.get("Close")
         vol = raw.get("Volume")
         try:
-            close_value = float(close) if close not in {None, "", "N/D"} else None
-        except ValueError:
+            close_value = None if is_missing_value(close) else float(close)
+        except (TypeError, ValueError):
             close_value = None
         try:
-            volume_value = float(vol) if vol not in {None, "", "N/D"} else None
-        except ValueError:
+            volume_value = None if is_missing_value(vol) else float(vol)
+        except (TypeError, ValueError):
             volume_value = None
         if close_value is None:
             missing.append("price_close")
@@ -642,14 +778,46 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
         else:
             base["avg_volume_usd"] = close_value * volume_value
         for field in required:
-            if field not in base or base.get(field) is None:
+            if field not in base or is_missing_value(base.get(field)):
                 missing.append(field)
-        if raw.get("Date") in {None, "", "N/D"}:
+        if is_missing_value(raw.get("Date")):
             missing.append("provider_date")
-        # Fundamentals remain from fixture baseline and are explicitly estimated, never invented as real.
-        estimated = [f"metrics.{k}" for k in base.get("metrics", {})]
-        quality = "HIGH" if not missing and len(estimated) == 0 else "MEDIUM" if not missing else "LOW"
         provider_name = row.get("provider", raw_payload["provider"])
+        ts = raw_payload.get("fetched_at", utc_now().isoformat())
+        base["price_data"] = {"price_close": financial_field(base.get("price_close"), provider_name, ts), "avg_volume_usd": financial_field(base.get("avg_volume_usd"), provider_name, ts), "volume": financial_field(volume_value, provider_name, ts), "provider_date": financial_field(raw.get("Date"), provider_name, ts)}
+        metrics = dict(base.get("metrics") or {})
+        if provider_name == "yfinance":
+            market_cap = raw.get("marketCap")
+            fcf = raw.get("freeCashFlow")
+            revenue = raw.get("totalRevenue")
+            equity = raw.get("stockholdersEquity")
+            net_income = raw.get("netIncome")
+            total_debt = raw.get("totalDebt")
+            if not is_missing_value(raw.get("trailingPE")):
+                metrics["pe_ttm"] = float(raw.get("trailingPE"))
+            if not is_missing_value(raw.get("enterpriseToEbitda")):
+                metrics["ev_ebitda"] = float(raw.get("enterpriseToEbitda"))
+            if not is_missing_value(raw.get("returnOnEquity")):
+                metrics["roe"] = float(raw.get("returnOnEquity"))
+            elif not is_missing_value(net_income) and not is_missing_value(equity) and float(equity) != 0:
+                metrics["roe"] = float(net_income) / float(equity)
+            if not is_missing_value(raw.get("revenueGrowth")):
+                metrics["revenue_growth"] = float(raw.get("revenueGrowth"))
+            if not is_missing_value(fcf) and not is_missing_value(market_cap) and float(market_cap) != 0:
+                metrics["fcf_yield"] = float(fcf) / float(market_cap)
+            if not is_missing_value(total_debt) and not is_missing_value(raw.get("enterpriseToEbitda")):
+                metrics["net_debt_ebitda"] = metrics.get("net_debt_ebitda")
+            for key in ["longName", "sector", "industry"]:
+                if not is_missing_value(raw.get(key)):
+                    base[{"longName": "company"}.get(key, key)] = raw.get(key)
+        base["metrics"] = metrics
+        metric_keys = ["pe_ttm", "ev_ebitda", "fcf_yield", "roe", "revenue_growth", "net_debt_ebitda", "momentum_6m", "drawdown_52w"]
+        estimated = [] if provider_name == "fixture" else [f"metrics.{k}" for k in metric_keys if k in metrics and provider_name != "yfinance"]
+        base["fundamentals_data"] = {k: financial_field(raw.get(k), provider_name, ts) for k in ["totalRevenue", "netIncome", "stockholdersEquity", "totalDebt", "freeCashFlow"]}
+        base["ratios_data"] = {k: financial_field(metrics.get(k), provider_name if provider_name == "yfinance" else "fixture", ts, is_estimated=(provider_name != "yfinance")) for k in metric_keys}
+        base["metadata_data"] = {k: financial_field(base.get(k), provider_name, ts) for k in ["company", "sector", "industry", "country", "currency"]}
+        base["corporate_actions"] = {}
+        quality = "HIGH" if not missing and len(estimated) == 0 else "MEDIUM" if not missing else "LOW"
         base.update({"data_source": "real_provider_with_fixture_fundamentals" if estimated else "real_provider", "provider": provider_name, "provider_date": raw.get("Date"), "as_of_date": today, "data_quality": quality, "estimated_fields": estimated, "missing_fields": sorted(set(missing)), "provider_errors": errors})
         assets.append(base)
     error_by_ticker = {e.get("ticker"): e.get("error") for e in raw_payload.get("errors", []) if e.get("ticker")}
@@ -1813,7 +1981,7 @@ def main() -> int:
     write_json(out_root / "forward_test_summary.json", {"date": today, "status": forward_test["status"], "metrics": forward_test["metrics"]})
     postmortem_path = write_forward_postmortem(out_root, run_id, today, forward_test)
     quality_provider = "fixture" if data_quality_report["source"] == "local_fixture" else data_quality_report["source"]
-    data_quality_report = build_data_quality_report(scored, run_id, today, scored, {"provider": quality_provider, "fetched_at": data_quality_report.get("data_timestamp_utc"), "errors": data_quality_report.get("provider_errors", [])})
+    data_quality_report = build_data_quality_report(scored, run_id, today, assets, {"provider": quality_provider, "fetched_at": data_quality_report.get("data_timestamp_utc"), "errors": data_quality_report.get("provider_errors", [])})
     coverage_report = build_universe_coverage_report(universes, assets, scoring_assets, candidates, pre_scoring_report, data_quality_report)
     data_quality_report["universe_coverage"] = coverage_report
     data_quality_report["snapshot_paths"] = {**snapshot_paths, **universe_snapshot_paths}
