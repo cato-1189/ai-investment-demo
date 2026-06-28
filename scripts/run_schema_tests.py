@@ -422,6 +422,25 @@ class Phase8HumanReviewTests(unittest.TestCase):
             self.assertFalse(proposal["real_order"])
             self.assertFalse(self.config["system"]["allow_real_orders"])
 
+class Phase9E2EValidationTests(unittest.TestCase):
+    def test_e2e_validation_script_generates_reports_and_core_checks_pass(self) -> None:
+        import subprocess, sys
+        proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "run_e2e_validation.py"), "--date", "2026-06-27"], cwd=ROOT, text=True, capture_output=True, check=True)
+        report_path = None
+        for line in proc.stdout.splitlines():
+            if line.startswith("Reporte JSON: "):
+                report_path = ROOT / line.split("Reporte JSON: ", 1)[1].strip()
+        self.assertIsNotNone(report_path)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        checks = {c["name"]: c for c in report["checks"]}
+        self.assertIn(report["status"], {"PASS", "WARNING"})
+        self.assertEqual(checks["outputs_obligatorios"]["status"], "PASS")
+        self.assertEqual(checks["sin_broker"]["status"], "PASS")
+        self.assertEqual(checks["real_order_siempre_false"]["status"], "PASS")
+        self.assertEqual(checks["benchmarks_fuera_scoring"]["status"], "PASS")
+        self.assertEqual(checks["context_packs_por_agente"]["status"], "PASS")
+        self.assertTrue((report_path.parent / "e2e_validation_report.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
