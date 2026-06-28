@@ -287,6 +287,7 @@ def build_control_report(preflight: dict[str, Any], pilot_proc: subprocess.Compl
         else:
             errors.append(f"Piloto terminó con código {pilot_proc.returncode}.")
     # Fase 12A: validar cobertura financiera efectiva leyendo el reporte real.
+    effective_coverage_failures = []
     if pilot_report:
         cfg = run_demo.load_config()
         settings = run_demo.market_data_settings(cfg)
@@ -304,9 +305,18 @@ def build_control_report(preflight: dict[str, Any], pilot_proc: subprocess.Compl
             observed = len(pilot_report.get(field, []) or []) / len(INVESTABLE) if INVESTABLE else 0.0
             if observed < float(threshold):
                 msg = f"Cobertura {label} efectiva {observed:.0%} menor al mínimo {float(threshold):.0%}."
-                (errors if warning_or_fail == "FAIL" else warnings).append(msg)
+                if warning_or_fail == "FAIL":
+                    effective_coverage_failures.append({"category": label, "observed": observed, "minimum": float(threshold), "message": msg})
+                    errors.append(msg)
+                else:
+                    warnings.append(msg)
 
-    status = "BLOCKED" if not started else ("FAIL" if errors and not (pilot_report and pilot_report.get("status") == "WARNING" and not [e for e in errors if 'código' in e]) else (pilot_report or {}).get("status", "PASS"))
+    if not started:
+        status = "BLOCKED"
+    elif effective_coverage_failures or errors:
+        status = "FAIL"
+    else:
+        status = (pilot_report or {}).get("status", "PASS")
     outputs = []
     if pilot_report_path:
         outputs.extend([rel(pilot_report_path), rel(pilot_report_path.with_suffix(".md"))])
@@ -318,7 +328,7 @@ def build_control_report(preflight: dict[str, Any], pilot_proc: subprocess.Compl
         "pilot_returncode": pilot_proc.returncode if pilot_proc else None,
         "pilot_status": (pilot_report or {}).get("status") if pilot_report else None,
         "data_readiness": preflight.get("data_readiness"),
-        "data_coverage": {"preflight_data_readiness_status": preflight.get("data_readiness_status"), "real_data_coverage_pct": (pilot_report or {}).get("real_data_coverage_pct"), "price_available": (pilot_report or {}).get("price_available"), "fundamentals_available": (pilot_report or {}).get("fundamentals_available"), "ratios_available": (pilot_report or {}).get("ratios_available"), "metadata_available": (pilot_report or {}).get("metadata_available"), "ready_for_scoring": (pilot_report or {}).get("ready_for_scoring"), "coverage_by_provider": (pilot_report or {}).get("coverage_by_provider"), "tickers_without_data": (pilot_report or {}).get("tickers_without_data"), "benchmarks_missing": (pilot_report or {}).get("benchmarks_missing")},
+        "data_coverage": {"preflight_data_readiness_status": preflight.get("data_readiness_status"), "real_data_coverage_pct": (pilot_report or {}).get("real_data_coverage_pct"), "price_available": (pilot_report or {}).get("price_available"), "fundamentals_available": (pilot_report or {}).get("fundamentals_available"), "fundamentals_estimated_available": (pilot_report or {}).get("fundamentals_estimated_available"), "ratios_available": (pilot_report or {}).get("ratios_available"), "ratios_estimated_available": (pilot_report or {}).get("ratios_estimated_available"), "metadata_available": (pilot_report or {}).get("metadata_available"), "ready_for_scoring": (pilot_report or {}).get("ready_for_scoring"), "coverage_by_provider": (pilot_report or {}).get("coverage_by_provider"), "tickers_without_data": (pilot_report or {}).get("tickers_without_data"), "benchmarks_missing": (pilot_report or {}).get("benchmarks_missing"), "effective_coverage_failures": effective_coverage_failures},
         "errors": errors,
         "warnings": warnings,
         "outputs_generated": outputs,

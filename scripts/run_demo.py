@@ -500,10 +500,16 @@ def resolve_universes(config: dict[str, Any]) -> dict[str, Any]:
     excluded = [asset_identity(a) for a in config.get("excluded_symbols", [])] + blocked
     return {"mode": mode, "investable": investable, "benchmarks": benchmarks, "excluded": excluded, "catalog_assets_loaded": len(catalog_by_ticker), "filters": filters}
 
-def _coverage_for_category(asset: dict[str, Any], category: str) -> float:
+def _coverage_for_category(asset: dict[str, Any], category: str, threshold: Any = None) -> float:
     data = asset.get(category) or {}
     if not data:
-        return 1.0
+        # Compatibilidad legacy explícita: las categorías no configuradas o con umbral 0
+        # no bloquean scoring. Si existe un mínimo mayor a 0, ausencia equivale a 0%.
+        try:
+            required_threshold = 0.0 if threshold is None else float(threshold)
+        except (TypeError, ValueError):
+            required_threshold = 0.0
+        return 0.0 if required_threshold > 0 else 1.0
     total = len(data)
     present = sum(1 for field in data.values() if not (isinstance(field, dict) and field.get("is_missing")) and not is_missing_value(field_value(field)))
     return present / total if total else 0.0
@@ -526,7 +532,7 @@ def has_sufficient_data_for_scoring(asset: dict[str, Any], config: dict[str, Any
     if metadata_threshold is not None:
         thresholds["metadata_data"] = metadata_threshold
     for category, threshold in thresholds.items():
-        if threshold is not None and _coverage_for_category(asset, category) < float(threshold):
+        if threshold is not None and float(threshold) > 0 and _coverage_for_category(asset, category, threshold) < float(threshold):
             return False
     return order.get(asset.get("data_quality", "LOW"), 0) >= order.get(minimum, 1)
 

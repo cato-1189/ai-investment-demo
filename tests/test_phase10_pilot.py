@@ -51,3 +51,31 @@ def test_real_pilot_report_security_and_visibility():
     assert not report["benchmarks_in_scoring"]
     assert set(report["requested_benchmarks"]).isdisjoint(set(report["assets_sent_to_scoring"]))
     assert (report_path.parent / "real_data_pilot_report.md").exists()
+
+
+def test_real_pilot_report_excludes_estimated_ratios_from_effective_coverage(tmp_path):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_real_data_pilot as pilot  # noqa: E402
+
+    out = ROOT / "outputs" / "test_real_pilot_report_excludes_estimated_ratios"
+    (out / "snapshots").mkdir(parents=True, exist_ok=True)
+    (out / "scoring_results.json").write_text("[]\n", encoding="utf-8")
+    (out / "data_quality_report.json").write_text(json.dumps({"investable_assets_blocked": [], "benchmarks_available": [], "provider_errors": [], "missing_data": []}), encoding="utf-8")
+    (out / "run_manifest.json").write_text(json.dumps({"broker_connected": False, "allow_real_orders": False, "llms_used": False}), encoding="utf-8")
+    (out / "simulated_trades.csv").write_text("ticker,real_order\nAAPL,false\n", encoding="utf-8")
+    (out / "snapshots" / "raw_market_data.json").write_text(json.dumps({"provider": "manual_csv", "minimum_real_data_coverage_pct": 0.0}), encoding="utf-8")
+    normalized = [{
+        "ticker": "AAPL",
+        "provider": "manual_csv",
+        "price_data": {"price_close": {"value": 200, "is_missing": False, "is_estimated": False}},
+        "ratios_data": {"pe_ttm": {"value": 20, "is_missing": False, "is_estimated": True, "provider": "fixture"}},
+        "fundamentals_data": {},
+        "metadata_data": {},
+    }]
+    (out / "snapshots" / "normalized_market_data.json").write_text(json.dumps(normalized), encoding="utf-8")
+
+    report = pilot.build_pilot_report(out, ["pilot"], f"Outputs: {out.relative_to(ROOT)}\n", "")
+
+    assert "AAPL" in report["price_available"]
+    assert "AAPL" not in report["ratios_available"]
+    assert "AAPL" in report["ratios_estimated_available"]
