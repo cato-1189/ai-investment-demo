@@ -299,5 +299,46 @@ class Phase6BUniverseTests(unittest.TestCase):
             self.assertTrue({"SPY", "QQQ", "EWZ", "ARGT", "BIL"} <= {a["ticker"] for a in benchmarks})
 
 
+class Phase6CUniverseBuilderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = run_demo.load_config()
+        self.today = "2026-06-27"
+
+    def test_external_catalogs_load_versioned_assets(self) -> None:
+        rows = run_demo.load_universe_catalogs(self.config)
+        self.assertIn("NVDA", {row["ticker"] for row in rows})
+        self.assertTrue(all("catalog_source" in row for row in rows))
+
+    def test_broad_market_loads_catalogs_without_breaking(self) -> None:
+        config = dict(self.config)
+        config["market_data"] = {**self.config["market_data"], "universe_mode": "broad_market", "universe": []}
+        universes = run_demo.resolve_universes(config)
+        self.assertGreaterEqual(universes["catalog_assets_loaded"], 20)
+        self.assertIn("PETR4.SA", {asset["ticker"] for asset in universes["investable"]})
+
+    def test_manual_exclusion_stays_out_of_scoring(self) -> None:
+        config = dict(self.config)
+        config["universe_modes"] = {**self.config["universe_modes"], "excluded_test": {"symbols": ["AAPL", "BRZU"]}}
+        config["market_data"] = {**self.config["market_data"], "universe_mode": "excluded_test", "universe": []}
+        universes = run_demo.resolve_universes(config)
+        self.assertNotIn("BRZU", {asset["ticker"] for asset in universes["investable"]})
+        self.assertIn("BRZU", {asset["ticker"] for asset in universes["excluded"]})
+
+    def test_assets_without_sufficient_data_are_blocked_before_scoring(self) -> None:
+        universes = run_demo.resolve_universes(self.config)
+        bad_asset = {**run_demo.read_json(run_demo.FIXTURE_PATH)[0], "ticker": "AAPL", "missing_fields": ["price_close"], "data_quality": "LOW"}
+        scoring_assets, report = run_demo.filter_assets_for_scoring([bad_asset], universes, self.config)
+        self.assertFalse(scoring_assets)
+        self.assertEqual(report["blocked_before_scoring"][0]["reason"], "insufficient_data_quality")
+
+    def test_max_assets_for_research_is_respected(self) -> None:
+        config = dict(self.config)
+        config["universe_builder"] = {**self.config["universe_builder"], "filters": {**self.config["universe_builder"]["filters"], "max_assets_for_research": 2}}
+        max_research = run_demo.universe_builder_settings(config)["filters"]["max_assets_for_research"]
+        scored = [{"ticker": f"T{i}", "total_score": 100 - i} for i in range(5)]
+        candidates = scored[: min(config["candidate_filters"]["max_candidates_for_decision"], max_research)]
+        self.assertEqual(len(candidates), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
