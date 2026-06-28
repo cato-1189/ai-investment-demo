@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fase 6: seguimiento de performance DEMO, benchmarks y forward-test."""
+"""Fase 7: forward-test, post-mortem y aprendizaje metodológico DEMO."""
 from __future__ import annotations
 
 import argparse
@@ -133,7 +133,7 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
     common = {
         "run_id": run_id,
         "date": today,
-        "phase": "FASE_6",
+        "phase": "FASE_7",
         "config_digest": config_digest(config),
         "safety": {"mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False},
     }
@@ -147,6 +147,10 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
     methodology = read_text(mf["methodology_state"], "").strip()[:2400]
     data_quality = read_text(mf["data_quality_memory"], "").strip()[:1800]
     perf = read_text(mf["performance_memory"], "").strip().splitlines()[-12:]
+    fwd = read_csv_rows(ROOT / performance_settings(config).get("forward_test_results", "memory/forward_test_results.csv"))[-12:]
+    postmortem_excerpt = read_text(mf["postmortem_memory"], "").strip()[-2400:]
+    coverage_path = out_root / "universe_coverage_report.json"
+    coverage = read_json(coverage_path, {}) if coverage_path.exists() else {}
     packs = {
         "research": [
             {"name": "methodology_excerpt", "content": methodology},
@@ -177,12 +181,17 @@ def build_context_packs(config: dict[str, Any], run_id: str, today: str, memory:
             {"name": "run_summary", "content": {"candidates": candidates, "finals": finals, "positions": len(portfolio.get("positions", []))}},
             {"name": "memory_diff", "content": memory_diff["changes"]},
             {"name": "performance_recent", "content": perf},
+            {"name": "forward_test_results_recent", "content": fwd},
+            {"name": "universe_coverage", "content": coverage},
+            {"name": "postmortem_lessons", "content": postmortem_excerpt},
         ],
         "learning_postmortem": [
             {"name": "decisions", "content": decisions},
             {"name": "audits", "content": audits},
             {"name": "risk_results", "content": finals},
             {"name": "memory_diff", "content": memory_diff["changes"]},
+            {"name": "forward_test_results_recent", "content": fwd},
+            {"name": "postmortem_lessons", "content": postmortem_excerpt},
         ],
     }
     pack_dir = out_root / "context_packs"
@@ -1183,7 +1192,7 @@ def build_performance(run_id: str, today: str, config: dict[str, Any], portfolio
 def build_decision_tracking(run_id: str, today: str, decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], assets_by_ticker: dict[str, dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     rows=[]
     for d,a,f in zip(decisions,audits,finals):
-        rows.append({"run_id":run_id,"date":today,"ticker":d["ticker"],"proposed_action":d["decision"],"final_action":f["final_decision"],"suggested_weight":d["suggested_weight"],"final_weight":f["final_weight"],"reference_price":assets_by_ticker.get(d["ticker"],{}).get("price_close"),"approval_reduction_or_block_reason":f.get("reason_for_blocking") or f.get("reason_for_adjustment"),"mock_audit":a,"risk_rules_applied":f["risk_rules_triggered"],"real_order":False})
+        rows.append({"run_id":run_id,"date":today,"ticker":d["ticker"],"proposed_action":d["decision"],"final_action":f["final_decision"],"suggested_weight":d["suggested_weight"],"final_weight":f["final_weight"],"reference_price":assets_by_ticker.get(d["ticker"],{}).get("price_close"),"approval_reduction_or_block_reason":f.get("reason_for_blocking") or f.get("reason_for_adjustment"),"mock_audit":a,"risk_rules_applied":f["risk_rules_triggered"],"benchmark_used":benchmark_for_asset(config, assets_by_ticker.get(d["ticker"])),"real_order":False})
     return rows
 
 
@@ -1191,9 +1200,99 @@ def forward_pending_rows(tracking: list[dict[str, Any]], config: dict[str, Any])
     rows=[]
     for row in tracking:
         for months in performance_settings(config).get("windows_months", [3,6,12]):
-            due = dt.date.fromisoformat(row["date"]) + dt.timedelta(days=30*int(months))
-            rows.append({"run_id":row["run_id"],"decision_date":row["date"],"ticker":row["ticker"],"window_months":months,"due_date":due.isoformat(),"final_action":row["final_action"],"reference_price":row["reference_price"],"status":"PENDING"})
+            due = add_months_approx(row["date"], int(months))
+            rows.append({"run_id":row["run_id"],"decision_date":row["date"],"ticker":row["ticker"],"window_months":months,"due_date":due,"final_action":row["final_action"],"reference_price":row["reference_price"],"benchmark_used":row.get("benchmark_used") or benchmark_for_asset(config, None),"status":"PENDING"})
     return rows
+
+
+
+
+def add_months_approx(date_text: str, months: int) -> str:
+    return (dt.date.fromisoformat(date_text) + dt.timedelta(days=30 * int(months))).isoformat()
+
+
+def benchmark_for_asset(config: dict[str, Any], asset: dict[str, Any] | None) -> str:
+    comp = performance_settings(config).get("composite_benchmark", {})
+    if asset:
+        override = comp.get("sector_overrides", {}).get(asset.get("sector"))
+        if override:
+            return override
+        mapped = comp.get("country_to_benchmark", {}).get(asset.get("country"))
+        if mapped:
+            return mapped
+    return config.get("markets", {}).get("benchmarks", {}).get("US", "SPY")
+
+
+def price_on_or_after(rows: list[dict[str, str]], ticker: str, target_date: str) -> float | None:
+    dated = sorted((r for r in rows if r.get("ticker") == ticker and r.get("date", "") >= target_date), key=lambda r: r.get("date", ""))
+    for row in dated:
+        price = safe_float(row.get("price"))
+        if price is not None:
+            return price
+    return None
+
+
+def evaluate_forward_tests(run_id: str, today: str, config: dict[str, Any], assets_by_ticker: dict[str, dict[str, Any]], performance: dict[str, Any]) -> dict[str, Any]:
+    settings = performance_settings(config)
+    pending_path = ROOT / settings.get("forward_test_pending", "memory/forward_test_pending.csv")
+    result_path = ROOT / settings.get("forward_test_results", "memory/forward_test_results.csv")
+    pending = read_csv_rows(pending_path)
+    prior_results = read_csv_rows(result_path)
+    done = {(r.get("source_run_id"), r.get("decision_date"), r.get("ticker"), str(r.get("window_months"))) for r in prior_results}
+    benchmark_rows = read_csv_rows(ROOT / settings.get("benchmark_prices_file", "memory/benchmark_prices.csv"))
+    benchmark_current = {r["ticker"]: safe_float(r.get("price")) for r in performance.get("benchmarks", []) if safe_float(r.get("price")) is not None}
+    rows: list[dict[str, Any]] = []
+    asof = dt.date.fromisoformat(today)
+    for item in pending:
+        key = (item.get("run_id"), item.get("decision_date"), item.get("ticker"), str(item.get("window_months")))
+        if key in done or item.get("status") == "EVALUATED":
+            continue
+        due = item.get("due_date") or add_months_approx(item["decision_date"], int(item.get("window_months", 0)))
+        if dt.date.fromisoformat(due) > asof:
+            continue
+        ticker = item.get("ticker", "")
+        asset = assets_by_ticker.get(ticker)
+        initial = safe_float(item.get("reference_price"))
+        final = safe_float(asset.get("price_close")) if asset else None
+        bench = benchmark_for_asset(config, asset) if asset else (item.get("benchmark_used") or benchmark_for_asset(config, None))
+        bench_initial = price_on_or_after(benchmark_rows, bench, item.get("decision_date", ""))
+        bench_final = benchmark_current.get(bench) or price_on_or_after(benchmark_rows, bench, today)
+        ret = pct_return(final, initial)
+        bret = pct_return(bench_final, bench_initial)
+        rel = round(ret - bret, 6) if ret is not None and bret is not None else None
+        if ret is None or bret is None:
+            status = "NOT_EVALUABLE"
+            why = "Faltan precios iniciales/finales del activo o benchmark; no se inventan datos."
+        else:
+            status = "WIN" if rel > 0.01 else "LOSS" if rel < -0.01 else "NEUTRAL"
+            why = f"Retorno activo {ret:.2%} vs benchmark {bench} {bret:.2%}; relativo {rel:.2%}."
+        rows.append({"evaluation_run_id": run_id, "source_run_id": item.get("run_id"), "decision_date": item.get("decision_date"), "ticker": ticker, "window_months": item.get("window_months"), "due_date": due, "final_action": item.get("final_action"), "initial_price": initial, "final_price": final, "benchmark_used": bench, "benchmark_initial_price": bench_initial, "benchmark_final_price": bench_final, "absolute_return": ret, "benchmark_return": bret, "relative_return": rel, "status": status, "explanation": why})
+    fields = ["evaluation_run_id","source_run_id","decision_date","ticker","window_months","due_date","final_action","initial_price","final_price","benchmark_used","benchmark_initial_price","benchmark_final_price","absolute_return","benchmark_return","relative_return","status","explanation"]
+    if rows:
+        append_csv_rows(result_path, rows, fields)
+    evaluable = [r for r in rows if r["status"] != "NOT_EVALUABLE"]
+    approved = [r for r in evaluable if r.get("final_action") == "APPROVED"]
+    blocked = [r for r in evaluable if r.get("final_action") in {"BLOCKED", "NEED_MORE_DATA"}]
+    wins = [r for r in evaluable if r["status"] == "WIN"]
+    metrics = {"expired_windows": len(rows), "evaluable_decisions": len(evaluable), "not_evaluable": len(rows)-len(evaluable), "hit_rate": round(len(wins)/len(evaluable), 6) if evaluable else None, "avg_return_approved": avg([r["absolute_return"] for r in approved]), "avg_return_blocked": avg([r["absolute_return"] for r in blocked]), "approved_successful": len([r for r in approved if r["status"] == "WIN"]), "approved_failed": len([r for r in approved if r["status"] == "LOSS"]), "blocked_would_have_worked": len([r for r in blocked if r["status"] == "WIN"]), "blocked_avoided_losses": len([r for r in blocked if r["status"] == "LOSS"]), "avg_relative_return_vs_benchmark": avg([r["relative_return"] for r in evaluable]), "portfolio_drawdown": performance.get("risk_metrics", {}).get("drawdown"), "best_decisions": sorted(evaluable, key=lambda r: r.get("relative_return") or -999, reverse=True)[:3], "worst_decisions": sorted(evaluable, key=lambda r: r.get("relative_return") or 999)[:3]}
+    return {"date": today, "rows": rows, "metrics": metrics, "status": "sin evaluaciones vencidas" if not rows else "evaluaciones procesadas"}
+
+
+def avg(values: list[Any]) -> float | None:
+    nums = [safe_float(v) for v in values if safe_float(v) is not None]
+    return round(sum(nums)/len(nums), 6) if nums else None
+
+
+def write_forward_postmortem(out_root: Path, run_id: str, today: str, forward: dict[str, Any]) -> Path:
+    m = forward["metrics"]
+    lines = [f"# Post-mortem forward-test DEMO - {today}", "", f"- Run ID: `{run_id}`", f"- Estado: {forward['status']}", f"- Ventanas vencidas procesadas: {m['expired_windows']}", f"- Evaluables: {m['evaluable_decisions']}; no evaluables: {m['not_evaluable']}", f"- Hit rate: {m['hit_rate']}", f"- Retorno promedio aprobadas: {m['avg_return_approved']}", f"- Retorno promedio bloqueadas: {m['avg_return_blocked']}", f"- Retorno relativo promedio vs benchmark: {m['avg_relative_return_vs_benchmark']}", f"- Drawdown cartera: {m['portfolio_drawdown']}", "", "## Recomendaciones metodológicas", "- Revisar manualmente patrones de decisiones LOSS antes de cambiar reglas.", "- Analizar blocked_would_have_worked como posible exceso de conservadurismo.", "- Mantener NOT_EVALUABLE visible y mejorar cobertura de datos sin imputar precios."]
+    if forward["rows"]:
+        lines += ["", "## Resultados", "| Ticker | Ventana | Acción | Estado | Retorno | Benchmark | Relativo |", "|---|---:|---|---|---:|---|---:|"]
+        for r in forward["rows"]:
+            lines.append(f"| {r['ticker']} | {r['window_months']} | {r['final_action']} | {r['status']} | {r['absolute_return']} | {r['benchmark_used']} | {r['relative_return']} |")
+    path = out_root / "forward_test_postmortem.md"
+    path.write_text("\n".join(lines)+"\n", encoding="utf-8")
+    return path
 
 
 def persist_performance_outputs(out_root: Path, config: dict[str, Any], perf: dict[str, Any], tracking: list[dict[str, Any]]) -> None:
@@ -1208,7 +1307,7 @@ def persist_performance_outputs(out_root: Path, config: dict[str, Any], perf: di
         append_jsonl(out_root / "decision_tracking_ledger.jsonl", row)
         append_jsonl(ledger_path, row)
     pending=forward_pending_rows(tracking, config)
-    fields=["run_id","decision_date","ticker","window_months","due_date","final_action","reference_price","status"]
+    fields=["run_id","decision_date","ticker","window_months","due_date","final_action","reference_price","benchmark_used","status"]
     write_csv(out_root / "forward_test_pending.csv", pending, fields)
     append_csv_rows(ROOT / performance_settings(config).get("forward_test_pending","memory/forward_test_pending.csv"), pending, fields)
     write_csv(out_root / "forward_test_results.csv", [], ["run_id","decision_date","ticker","window_months","due_date","result_return","benchmark_return","relative_return","classification"])
@@ -1293,7 +1392,7 @@ def write_universe_snapshots(out_root: Path, universes: dict[str, Any]) -> dict[
         paths[name] = str((out_root / f"{name}.json").relative_to(ROOT))
     return paths
 
-def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any], validation_report: dict[str, Any], performance: dict[str, Any] | None = None) -> None:
+def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any], scored: list[dict[str, Any]], finals: list[dict[str, Any]], trades: list[dict[str, Any]], portfolio: dict[str, Any], validation_report: dict[str, Any], performance: dict[str, Any] | None = None, forward_test: dict[str, Any] | None = None) -> None:
     lines = [
         f"# Reporte diario DEMO - {today}",
         "",
@@ -1317,6 +1416,12 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
         f"- Benchmarks configurados: {', '.join((performance or {}).get('composite_benchmark', {}).get('weights', {}).keys()) if performance else 'SPY, QQQ, EWZ, ARGT, BIL'}",
         f"- Datos faltantes de benchmark visibles: {', '.join((performance or {}).get('missing_benchmark_data', [])) if performance else '-'}",
         "",
+        "## Forward-test y post-mortem",
+        f"- Estado: {(forward_test or {}).get('status', 'no calculado')}",
+        f"- Ventanas vencidas: {((forward_test or {}).get('metrics') or {}).get('expired_windows')}",
+        f"- Hit rate: {((forward_test or {}).get('metrics') or {}).get('hit_rate')}",
+        "- Recomendaciones metodológicas: informativas; no modifican config ni reglas humanas.",
+        "",
         "## Decisiones finales",
         "| Ticker | Score | Decisión final | Peso final | Reglas disparadas |",
         "|---|---:|---|---:|---|",
@@ -1331,7 +1436,7 @@ def generate_report(path: Path, run_id: str, today: str, config: dict[str, Any],
     else:
         lines.append("| - | Sin operaciones ejecutadas en paper | 0.00 | false |")
     lines += ["", "## Contratos Fase 2", "- Los outputs críticos se validan contra schemas versionados en `schemas/`.", "- Si un contrato crítico falla, la corrida termina con un error explícito antes de persistir el resultado inválido."]
-    lines += ["", "## Limitaciones Fase 6", "- Datos reales solo si config los habilita; fixtures siguen default y fallback.", "- decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
+    lines += ["", "## Limitaciones Fase 7", "- Datos reales solo si config los habilita; fixtures siguen default y fallback.", "- decision_agent y audit_agent siguen mock.", "- No hay broker ni posibilidad de órdenes reales."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1410,20 +1515,23 @@ def build_memory_update(run_id: str, today: str, decisions: list[dict[str, Any]]
     items = []
     for decision, audit, final in zip(decisions, audits, finals):
         items.append({"ticker": decision["ticker"], "fact_type": "demo_decision", "summary": f"{decision['decision']} / {audit['audit_result']} / {final['final_decision']}", "source_run_id": run_id, "verified": False})
-    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 6; datos de mercado pueden ser fixture o proveedor explícito según data_quality_report."}
+    return {"run_id": run_id, "date": today, "update_status": "MOCK_RECORDED", "items": items, "human_readable_summary": "Actualización de memoria externa Fase 7; datos de mercado pueden ser fixture o proveedor explícito según data_quality_report."}
 
 
-def update_external_memory(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], data_quality_report: dict[str, Any]) -> dict[str, Any]:
+def update_external_memory(config: dict[str, Any], run_id: str, today: str, memory: dict[str, str], scored: list[dict[str, Any]], decisions: list[dict[str, Any]], audits: list[dict[str, Any]], finals: list[dict[str, Any]], portfolio: dict[str, Any], data_quality_report: dict[str, Any], forward_test: dict[str, Any] | None = None) -> dict[str, Any]:
     before = {key: (ROOT / rel).read_text(encoding="utf-8") if (ROOT / rel).exists() else "" for key, rel in memory.items()}
     changed: list[dict[str, Any]] = []
     mf = {key: ROOT / rel for key, rel in memory.items()}
 
     write_json(mf["portfolio_state"], portfolio)
-    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 6 ejecutada en DEMO; datos de cierre controlados solo si config los habilita y sin broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
+    append_markdown_section(mf["project_state"], f"Corrida {run_id}", [f"Fecha: {today}.", "Fase 7 ejecutada en DEMO; datos de cierre controlados, forward-test paper y sin broker.", f"Context packs construidos para agentes futuros desde memoria externa."])
     append_markdown_section(mf["methodology_state"], f"Revisión operativa {run_id}", ["Se mantiene metodología DEMO determinística basada en fixtures locales.", "Los hechos no verificados se registran explícitamente como no verificados."])
+    if forward_test is not None:
+        fm = forward_test["metrics"]
+        append_markdown_section(mf["methodology_state"], f"Recomendaciones forward-test {run_id}", [f"Hit rate observado: {fm['hit_rate']} sobre {fm['evaluable_decisions']} decisiones evaluables; recomendación informativa, no modifica reglas.", f"Bloqueadas que hubieran funcionado: {fm['blocked_would_have_worked']}; bloqueadas que evitaron pérdidas: {fm['blocked_avoided_losses']}.", "No actualizar config_demo.yaml ni reglas humanas automáticamente."])
     append_markdown_section(mf["data_quality_memory"], f"Calidad de datos {run_id}", [f"Fuente: {data_quality_report['source']}.", f"Activos revisados: {data_quality_report['total_assets_checked']}.", f"Conteo por calidad: {data_quality_report['quality_counts']}."])
     append_markdown_section(mf["config_change_log"], f"Digest config {run_id}", [f"sha256: {config_digest(config)}.", "No se registraron credenciales ni integraciones operativas."])
-    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 6 valida ingesta controlada de datos; no evalúa performance real."])
+    append_markdown_section(mf["postmortem_memory"], f"Aprendizaje {run_id}", ["Fase 7 evalúa ventanas forward-test vencidas en paper trading; si faltan datos marca NOT_EVALUABLE.", f"Estado forward-test: {forward_test['status'] if forward_test else 'no calculado'}.", f"Métricas: {forward_test['metrics'] if forward_test else {}}."])
 
     for decision, audit, final in zip(decisions, audits, finals):
         item = {"run_id": run_id, "date": today, "ticker": decision["ticker"], "decision_agent_action": decision["decision"], "audit_result": audit["audit_result"], "final_action": final["final_decision"], "reason": final["reason_for_blocking"] or final["reason_for_adjustment"]}
@@ -1450,16 +1558,16 @@ def write_memory_diff_markdown(path: Path, memory_diff: dict[str, Any]) -> None:
 
 
 def build_run_manifest(run_id: str, today: str, config: dict[str, Any], prompts: dict[str, Any], memory: dict[str, str], validation_report: dict[str, Any]) -> dict[str, Any]:
-    return {"run_id": run_id, "date": today, "phase": "FASE_6", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
+    return {"run_id": run_id, "date": today, "phase": "FASE_7", "mode": config["system"]["mode"], "allow_real_orders": config["system"]["allow_real_orders"], "external_apis_used": llm_enabled(config) or market_data_settings(config).get("enabled"), "llms_used": llm_enabled(config), "broker_connected": False, "schemas_version": "phase2.v1", "prompts_loaded": prompts, "memory_files": memory, "validation_summary": {"status": validation_report.get("status", "PENDING"), "checked_outputs": validation_report.get("checked_outputs", 0), "invalid_outputs": validation_report.get("invalid_outputs", 0)}}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ejecuta Fase 6 DEMO con datos de cierre controlados, sin broker.")
+    parser = argparse.ArgumentParser(description="Ejecuta Fase 7 DEMO con forward-test y post-mortem, sin broker.")
     parser.add_argument("--date", default=utc_now().date().isoformat(), help="Fecha de corrida YYYY-MM-DD")
     args = parser.parse_args()
     today = args.date
     stamp = utc_now().strftime("%H%M%S")
-    run_id = f"{today}_demo_phase6_{stamp}"
+    run_id = f"{today}_demo_phase7_{stamp}"
 
     config = load_config()
     errors = validate_demo_safety(config) + validate_market_data_safety(config) + validate_llm_safety(config)
@@ -1492,6 +1600,11 @@ def main() -> int:
     performance = build_performance(run_id, today, config, portfolio, assets_by_ticker)
     decision_tracking = build_decision_tracking(run_id, today, decisions, audits, finals, assets_by_ticker, config)
     persist_performance_outputs(out_root, config, performance, decision_tracking)
+    forward_test = evaluate_forward_tests(run_id, today, config, assets_by_ticker, performance)
+    forward_fields = ["evaluation_run_id","source_run_id","decision_date","ticker","window_months","due_date","final_action","initial_price","final_price","benchmark_used","benchmark_initial_price","benchmark_final_price","absolute_return","benchmark_return","relative_return","status","explanation"]
+    write_csv(out_root / "forward_test_results.csv", forward_test["rows"], forward_fields)
+    write_json(out_root / "forward_test_summary.json", {"date": today, "status": forward_test["status"], "metrics": forward_test["metrics"]})
+    postmortem_path = write_forward_postmortem(out_root, run_id, today, forward_test)
     quality_provider = "fixture" if data_quality_report["source"] == "local_fixture" else data_quality_report["source"]
     data_quality_report = build_data_quality_report(scored, run_id, today, scored, {"provider": quality_provider, "fetched_at": data_quality_report.get("data_timestamp_utc"), "errors": data_quality_report.get("provider_errors", [])})
     coverage_report = build_universe_coverage_report(universes, assets, scoring_assets, candidates, pre_scoring_report, data_quality_report)
@@ -1505,7 +1618,7 @@ def main() -> int:
     data_quality_report["investable_assets_with_sufficient_data"] = sorted({a["ticker"] for a in scoring_assets})
     data_quality_report["investable_assets_blocked"] = sorted(eligible_tickers - {a["ticker"] for a in scoring_assets})
     memory_update = build_memory_update(run_id, today, decisions, audits, finals)
-    memory_diff = update_external_memory(config, run_id, today, memory, scored, decisions, audits, finals, portfolio, data_quality_report)
+    memory_diff = update_external_memory(config, run_id, today, memory, scored, decisions, audits, finals, portfolio, data_quality_report, forward_test)
     context_pack_summary = build_context_packs(config, run_id, today, memory, scored, research_outputs, decisions, audits, finals, portfolio, memory_diff, out_root)
     research_outputs, llm_summary = research_with_optional_llm(config, today, candidates, out_root / "context_packs" / "research.json", log_path)
     if llm_summary["enabled"]:
@@ -1544,7 +1657,7 @@ def main() -> int:
     write_json(out_root / "data_quality_report.json", data_quality_report)
     write_json(out_root / "universe_coverage_report.json", coverage_report)
     write_json(out_root / "validation_report.json", validation_report)
-    generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio, validation_report, performance)
+    generate_report(out_root / "daily_report.md", run_id, today, config, scored, finals, trades, portfolio, validation_report, performance, forward_test)
 
     portfolio_path = ROOT / config["context_management"]["memory_files"]["portfolio_state"]
     write_json(portfolio_path, portfolio)

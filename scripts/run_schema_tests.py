@@ -246,6 +246,28 @@ class Phase6PerformanceTests(unittest.TestCase):
         self.assertEqual({int(r["window_months"]) for r in pending}, {3, 6, 12})
         self.assertTrue(all(r["status"] == "PENDING" for r in pending))
 
+    def test_forward_test_evaluates_expired_and_missing_prices(self) -> None:
+        with tempfile.TemporaryDirectory(dir=run_demo.ROOT) as tmp_name:
+            tmp = Path(tmp_name).relative_to(run_demo.ROOT)
+            config = dict(self.config)
+            perf = dict(run_demo.performance_settings(self.config))
+            perf["forward_test_pending"] = str(tmp / "pending.csv")
+            perf["forward_test_results"] = str(tmp / "results.csv")
+            perf["benchmark_prices_file"] = str(tmp / "bench.csv")
+            config["performance_tracking"] = perf
+            run_demo.write_csv(run_demo.ROOT / perf["forward_test_pending"], [
+                {"run_id":"old","decision_date":"2026-01-01","ticker":"ACME","window_months":3,"due_date":"2026-04-01","final_action":"APPROVED","reference_price":100,"benchmark_used":"SPY","status":"PENDING"},
+                {"run_id":"old","decision_date":"2026-01-01","ticker":"MISSING","window_months":3,"due_date":"2026-04-01","final_action":"BLOCKED","reference_price":50,"benchmark_used":"SPY","status":"PENDING"},
+            ], ["run_id","decision_date","ticker","window_months","due_date","final_action","reference_price","benchmark_used","status"])
+            run_demo.write_csv(run_demo.ROOT / perf["benchmark_prices_file"], [{"date":"2026-01-01","ticker":"SPY","label":"S&P","price":500,"return_daily":"","missing_data":False,"source":"test"}, {"date":"2026-01-01","ticker":"QQQ","label":"Nasdaq","price":500,"return_daily":"","missing_data":False,"source":"test"}], ["date","ticker","label","price","return_daily","missing_data","source"])
+            assets = {"ACME": {**self.assets_by_ticker["ACME"], "price_close": 120, "country":"US", "sector":"Technology"}}
+            summary = run_demo.evaluate_forward_tests("eval", "2026-06-27", config, assets, {"benchmarks":[{"ticker":"SPY","price":550}, {"ticker":"QQQ","price":550}], "risk_metrics":{"drawdown":-0.01}})
+            self.assertEqual(summary["metrics"]["expired_windows"], 2)
+            by_ticker = {r["ticker"]: r for r in summary["rows"]}
+            self.assertEqual(by_ticker["ACME"]["status"], "WIN")
+            self.assertEqual(by_ticker["MISSING"]["status"], "NOT_EVALUABLE")
+            self.assertEqual(summary["metrics"]["hit_rate"], 1.0)
+
     def test_demo_safety_no_broker_and_real_order_false(self) -> None:
         self.assertFalse(self.config["system"]["allow_real_orders"])
         self.assertFalse(any("broker" in e.lower() for e in run_demo.validate_demo_safety(self.config)))
