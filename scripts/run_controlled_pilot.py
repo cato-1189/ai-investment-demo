@@ -23,6 +23,7 @@ from run_real_data_pilot import BENCHMARKS, INVESTABLE  # noqa: E402
 RUN_REAL_DATA_PILOT = ROOT / "scripts" / "run_real_data_pilot.py"
 MIN_MANUAL_COLUMNS = {"ticker", "date", "close", "volume", "currency", "source"}
 MAX_CONTROLLED_INVESTABLES = 10
+SUPPORTED_DATA_PROVIDERS = {"fixture", "stooq_csv", "manual_csv", "yfinance", "multi_provider"}
 
 
 def utc_now() -> dt.datetime:
@@ -78,12 +79,90 @@ def preflight_status(checks: list[dict[str, Any]]) -> str:
     return "PASS"
 
 
+def provider_probe(config: dict[str, Any], date: str) -> dict[str, Any]:
+    """Chequeo operativo no intrusivo del proveedor configurado.
+
+    Fase 11B agregó un probe previo al piloto; Fase 12A amplía los proveedores
+    soportados. Este probe no conecta brokers, no ejecuta órdenes y evita llamadas
+    externas durante el preflight: valida configuración, fallback manual y
+    disponibilidad local del CSV cuando corresponde.
+    """
+    settings = run_demo.market_data_settings(config)
+    provider = settings.get("provider")
+    priority = list(settings.get("provider_priority") or [])
+    errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    details: dict[str, Any] = {
+        "provider": provider,
+        "provider_priority": priority,
+        "enable_yfinance_provider": bool(settings.get("enable_yfinance_provider", False)),
+        "allow_manual_csv_fallback": bool(settings.get("allow_manual_csv_fallback", False)),
+    }
+
+    if provider not in SUPPORTED_DATA_PROVIDERS:
+        errors.append({"provider": provider, "error": "proveedor no soportado"})
+    unsupported_priority = [item for item in priority if item not in SUPPORTED_DATA_PROVIDERS - {"fixture", "multi_provider"}]
+    if unsupported_priority:
+        errors.append({"provider": provider, "error": "provider_priority contiene proveedores no soportados", "unsupported": unsupported_priority})
+    real_mode_enabled = settings.get("mode") == "real" and settings.get("enabled")
+    if real_mode_enabled and "manual_csv" in priority and not settings.get("allow_manual_csv_fallback"):
+        warnings.append({"provider": "manual_csv", "warning": "manual_csv está en provider_priority pero allow_manual_csv_fallback=false"})
+    if provider == "manual_csv" or "manual_csv" in priority:
+        csv_path = manual_csv_path(config, date)
+        columns, tickers, delimiter = read_manual_header_and_tickers(csv_path)
+        details["manual_csv"] = {"path": rel(csv_path), "exists": csv_path.exists(), "columns": sorted(columns), "tickers_found": sorted(tickers), "delimiter": delimiter}
+        if provider == "manual_csv" and not csv_path.exists():
+            errors.append({"provider": "manual_csv", "error": "CSV manual requerido pero ausente", "path": rel(csv_path)})
+    if real_mode_enabled and "yfinance" in priority and not settings.get("enable_yfinance_provider", False):
+        warnings.append({"provider": "yfinance", "warning": "yfinance está en provider_priority pero enable_yfinance_provider=false"})
+
+    status = "FAIL" if errors else "WARNING" if warnings else "PASS"
+    return {"status": status, "errors": errors, "warnings": warnings, **details}
+
+
+def build_data_readiness(config: dict[str, Any], date: str, probe: dict[str, Any], *, require_manual_csv: bool = False) -> dict[str, Any]:
+    """Resumen Fase 11B/Fase 12A de preparación de datos antes de ejecutar."""
+    settings = run_demo.market_data_settings(config)
+    csv_path = manual_csv_path(config, date)
+    columns, tickers, delimiter = read_manual_header_and_tickers(csv_path)
+    missing_manual_columns = sorted(MIN_MANUAL_COLUMNS - columns) if csv_path.exists() else []
+    missing_manual_tickers = sorted(set(INVESTABLE) - tickers) if csv_path.exists() else []
+    financial_policy = {
+        "minimum_price_coverage_pct": float(settings.get("minimum_price_coverage_pct", 0.0)),
+        "minimum_fundamentals_coverage_pct": float(settings.get("minimum_fundamentals_coverage_pct", 0.0)),
+        "minimum_ratios_coverage_pct": float(settings.get("minimum_ratios_coverage_pct", 0.0)),
+        "required_fields_for_scoring": settings.get("required_fields_for_scoring", []),
+        "fail_if_required_financial_fields_missing": bool(settings.get("fail_if_required_financial_fields_missing", True)),
+    }
+    status = "FAIL" if probe.get("status") == "FAIL" or (require_manual_csv and (not csv_path.exists() or missing_manual_columns or missing_manual_tickers)) else ("WARNING" if probe.get("status") == "WARNING" else "PASS")
+    return {
+        "status": status,
+        "provider_probe_status": probe.get("status"),
+        "provider_probe_errors": probe.get("errors", []),
+        "provider_probe_warnings": probe.get("warnings", []),
+        "manual_csv": {
+            "required": require_manual_csv or settings.get("provider") == "manual_csv",
+            "path": rel(csv_path),
+            "exists": csv_path.exists(),
+            "delimiter": delimiter,
+            "columns": sorted(columns),
+            "missing_columns": missing_manual_columns,
+            "tickers_found": sorted(tickers),
+            "missing_investable_tickers": missing_manual_tickers,
+        },
+        "financial_policy": financial_policy,
+        "benchmarks_outside_scoring": not run_demo.universe_builder_settings(config).get("allow_benchmarks_in_scoring", False),
+    }
+
+
 def build_preflight(config: dict[str, Any], date: str, *, require_manual_csv: bool = False, allow_real_llm: bool = False) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     settings = run_demo.market_data_settings(config)
     llm = run_demo.llm_settings(config)
     agents = set(llm.get("real_agents", []))
     config_text = run_demo.CONFIG_PATH.read_text(encoding="utf-8")
+    probe = provider_probe(config, date)
+    data_readiness = build_data_readiness(config, date, probe, require_manual_csv=require_manual_csv)
 
     add_check(checks, "demo_paper_trading_mode", "PASS" if config.get("system", {}).get("mode") == "DEMO_PAPER_TRADING" else "FAIL", "El modo debe ser DEMO_PAPER_TRADING.", observed=config.get("system", {}).get("mode"))
     add_check(checks, "broker_disconnected", "PASS" if "broker_connected: true" not in config_text.lower() and "broker_provider" not in config_text.lower() else "FAIL", "No hay broker configurado ni conectado.")
@@ -91,8 +170,10 @@ def build_preflight(config: dict[str, Any], date: str, *, require_manual_csv: bo
     add_check(checks, "decision_audit_real_disabled", "PASS" if not ({"decision_agent", "audit_agent"} & agents) else "FAIL", "decision_agent y audit_agent reales deben estar deshabilitados.", real_agents=sorted(agents))
     llm_ok = not llm.get("enabled") or allow_real_llm
     add_check(checks, "llm_real_disabled", "PASS" if llm_ok else "FAIL", "LLM real deshabilitado salvo autorización explícita.", llm_enabled=bool(llm.get("enabled")), allow_real_llm=allow_real_llm)
-    provider_ok = bool(settings.get("provider")) and settings.get("provider") in {"fixture", "stooq_csv", "manual_csv", "yfinance", "multi_provider"}
+    provider_ok = bool(settings.get("provider")) and settings.get("provider") in SUPPORTED_DATA_PROVIDERS
     add_check(checks, "data_provider_configured", "PASS" if provider_ok else "FAIL", "Proveedor de datos configurado y soportado.", provider=settings.get("provider"), provider_priority=settings.get("provider_priority"))
+    add_check(checks, "provider_probe", probe["status"], "Provider probe operativo sin broker ni órdenes reales.", provider=probe.get("provider"), provider_priority=probe.get("provider_priority"), provider_probe_errors=probe.get("errors", []), provider_probe_warnings=probe.get("warnings", []))
+    add_check(checks, "data_readiness", data_readiness["status"], "Preparación de datos validada antes del piloto controlado.", data_readiness=data_readiness)
 
     manual_required = require_manual_csv or settings.get("provider") == "manual_csv"
     csv_path = manual_csv_path(config, date)
@@ -131,6 +212,9 @@ def build_preflight(config: dict[str, Any], date: str, *, require_manual_csv: bo
         "checks": checks,
         "errors": [c for c in checks if c["status"] == "FAIL"],
         "warnings": [c for c in checks if c["status"] == "WARNING"],
+        "data_readiness": data_readiness,
+        "provider_probe_errors": probe.get("errors", []),
+        "provider_probe_warnings": probe.get("warnings", []),
         "safety_confirmation": {"mode": config.get("system", {}).get("mode"), "broker_connected": False, "allow_real_orders": config.get("system", {}).get("allow_real_orders"), "decision_agent_real": "decision_agent" in agents, "audit_agent_real": "audit_agent" in agents, "llm_enabled": bool(llm.get("enabled")), "real_orders_possible": False},
         "controlled_universe": {"investable": INVESTABLE, "benchmarks": BENCHMARKS},
     }
@@ -140,7 +224,7 @@ def write_preflight_md(path: Path, report: dict[str, Any]) -> None:
     lines = ["# Preflight controlled pilot - Fase 11", "", f"- Estado: **{report['status']}**", f"- Fecha: `{report['date']}`", "", "## Checks"]
     for c in report["checks"]:
         lines.append(f"- **{c['status']}** `{c['name']}`: {c['message']}")
-    lines += ["", "## Seguridad", f"- Broker conectado: `{report['safety_confirmation']['broker_connected']}`", f"- allow_real_orders: `{report['safety_confirmation']['allow_real_orders']}`", f"- Órdenes reales posibles: `{report['safety_confirmation']['real_orders_possible']}`", "- decision_agent y audit_agent reales deshabilitados."]
+    lines += ["", "## Data readiness", f"- Estado: `{report.get('data_readiness', {}).get('status')}`", f"- Provider probe errors: `{report.get('provider_probe_errors', [])}`", "", "## Seguridad", f"- Broker conectado: `{report['safety_confirmation']['broker_connected']}`", f"- allow_real_orders: `{report['safety_confirmation']['allow_real_orders']}`", f"- Órdenes reales posibles: `{report['safety_confirmation']['real_orders_possible']}`", "- decision_agent y audit_agent reales deshabilitados."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -173,7 +257,9 @@ def build_control_report(preflight: dict[str, Any], pilot_proc: subprocess.Compl
         "pilot_started": started,
         "pilot_returncode": pilot_proc.returncode if pilot_proc else None,
         "pilot_status": (pilot_report or {}).get("status") if pilot_report else None,
-        "data_coverage": {"real_data_coverage_pct": (pilot_report or {}).get("real_data_coverage_pct"), "coverage_by_provider": (pilot_report or {}).get("coverage_by_provider"), "tickers_without_data": (pilot_report or {}).get("tickers_without_data"), "benchmarks_missing": (pilot_report or {}).get("benchmarks_missing")},
+        "data_coverage": {"real_data_coverage_pct": (pilot_report or {}).get("real_data_coverage_pct"), "coverage_by_provider": (pilot_report or {}).get("coverage_by_provider"), "coverage_by_data_type": (pilot_report or {}).get("coverage_by_data_type"), "tickers_without_data": (pilot_report or {}).get("tickers_without_data"), "benchmarks_missing": (pilot_report or {}).get("benchmarks_missing")},
+        "data_readiness": preflight.get("data_readiness", {}),
+        "provider_probe_errors": preflight.get("provider_probe_errors", []),
         "errors": errors,
         "warnings": warnings,
         "outputs_generated": outputs,
@@ -195,7 +281,7 @@ def recommendation(preflight_status_value: str, started: bool, pilot_report: dic
 
 
 def write_control_md(path: Path, report: dict[str, Any]) -> None:
-    lines = ["# Run control report - Fase 11", "", f"- Estado: **{report['status']}**", f"- Preflight: `{report['preflight_status']}`", f"- Piloto ejecutado: `{report['pilot_started']}`", f"- Estado piloto: `{report['pilot_status']}`", "", "## Cobertura", f"- Cobertura real: `{report['data_coverage']['real_data_coverage_pct']}`", f"- Tickers sin datos: `{report['data_coverage']['tickers_without_data']}`", f"- Benchmarks faltantes: `{report['data_coverage']['benchmarks_missing']}`", "", "## Seguridad", f"- Broker conectado: `{report['safety_confirmation']['broker_connected']}`", f"- allow_real_orders: `{report['safety_confirmation']['allow_real_orders']}`", f"- Config modificada automáticamente: `{report['safety_confirmation']['config_demo_yaml_modified']}`", "", "## Warnings y errores", f"- Warnings: `{report['warnings']}`", f"- Errores: `{report['errors']}`", "", "## Próxima acción", report["recommendation"]]
+    lines = ["# Run control report - Fase 11", "", f"- Estado: **{report['status']}**", f"- Preflight: `{report['preflight_status']}`", f"- Piloto ejecutado: `{report['pilot_started']}`", f"- Estado piloto: `{report['pilot_status']}`", "", "## Cobertura", f"- Cobertura real: `{report['data_coverage']['real_data_coverage_pct']}`", f"- Cobertura financiera: `{report['data_coverage'].get('coverage_by_data_type')}`", f"- Tickers sin datos: `{report['data_coverage']['tickers_without_data']}`", f"- Benchmarks faltantes: `{report['data_coverage']['benchmarks_missing']}`", "", "## Data readiness", f"- Estado: `{report.get('data_readiness', {}).get('status')}`", f"- Provider probe errors: `{report.get('provider_probe_errors', [])}`", "", "## Seguridad", f"- Broker conectado: `{report['safety_confirmation']['broker_connected']}`", f"- allow_real_orders: `{report['safety_confirmation']['allow_real_orders']}`", f"- Config modificada automáticamente: `{report['safety_confirmation']['config_demo_yaml_modified']}`", "", "## Warnings y errores", f"- Warnings: `{report['warnings']}`", f"- Errores: `{report['errors']}`", "", "## Próxima acción", report["recommendation"]]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
