@@ -421,3 +421,107 @@ python scripts/run_demo.py --date 2026-06-27
 python scripts/run_e2e_validation.py --date 2026-06-27
 python scripts/run_real_data_pilot.py --date 2026-06-27 --activate-real-data-pilot
 ```
+
+## Fase 11: controlled pilot con preflight operativo
+
+La Fase 11 agrega una capa de ejecución controlada antes de automatizar cualquier corrida diaria. Su objetivo es decidir si una corrida DEMO/paper trading puede ejecutarse, debe bloquearse o puede continuar solo con aceptación humana de warnings.
+
+### Cuándo usar cada comando
+
+- **Demo normal:** usar cuando se quiere validar el flujo fixture/mock sin red ni proveedores externos.
+
+  ```bash
+  python scripts/run_demo.py --date 2026-06-27
+  ```
+
+- **E2E fixture:** usar cuando se quiere validar contratos end-to-end con fixture y outputs esperados.
+
+  ```bash
+  python scripts/run_e2e_validation.py --date 2026-06-27
+  ```
+
+- **Piloto real:** usar cuando un humano quiere probar datos reales de cierre con activación explícita, siempre en paper trading.
+
+  ```bash
+  python scripts/run_real_data_pilot.py --date 2026-06-27 --activate-real-data-pilot
+  ```
+
+- **Controlled pilot:** usar antes de una corrida operativa controlada. Primero ejecuta preflight y solo lanza el piloto real si es seguro según PASS/WARNING/FAIL.
+
+  ```bash
+  python scripts/run_controlled_pilot.py --date 2026-06-27
+  ```
+
+  Si el preflight queda en `WARNING`, la corrida se bloquea por default. Para continuar con aceptación explícita del humano:
+
+  ```bash
+  python scripts/run_controlled_pilot.py --date 2026-06-27 --allow-warning-run
+  ```
+
+### Qué valida el preflight
+
+El preflight de Fase 11 revisa, antes de ejecutar el piloto:
+
+- `system.mode: DEMO_PAPER_TRADING`;
+- broker desconectado y sin configuración operativa de broker;
+- `system.allow_real_orders: false`;
+- `decision_agent` y `audit_agent` reales deshabilitados;
+- LLM real deshabilitado salvo `--allow-real-llm` explícito;
+- proveedor de datos configurado y soportado;
+- CSV manual presente si se exige con `--require-manual-csv` o si el proveedor es `manual_csv`;
+- columnas mínimas de CSV manual: `ticker`, `date`, `close`, `volume`, `currency`, `source`;
+- tickers invertibles esperados presentes en el CSV manual cuando el CSV es requerido;
+- benchmarks presentes o advertidos;
+- universo controlado pequeño;
+- `config/config_demo.yaml` solo leído, no modificado automáticamente;
+- benchmarks fuera del scoring.
+
+### Cómo interpretar PASS/WARNING/FAIL
+
+- **PASS:** todas las validaciones operativas pasaron. El controlled pilot ejecuta internamente:
+
+  ```bash
+  python scripts/run_real_data_pilot.py --date <fecha> --activate-real-data-pilot
+  ```
+
+- **WARNING:** no hay bloqueo duro, pero hay advertencias visibles, por ejemplo benchmark faltante. No ejecuta por default. Solo ejecuta si se pasa `--allow-warning-run`.
+- **FAIL:** existe un bloqueo de seguridad u operativo. No ejecuta el piloto. Se debe corregir la causa y repetir.
+
+### Reportes generados
+
+Cada controlled pilot crea una carpeta bajo:
+
+```text
+outputs/controlled_runs/<YYYY-MM-DD>/<run_id>/
+```
+
+Dentro guarda:
+
+```text
+preflight_report.json
+preflight_report.md
+run_control_report.json
+run_control_report.md
+```
+
+El `preflight_report` muestra checks individuales PASS/WARNING/FAIL. El `run_control_report` consolida estado de preflight, estado del piloto, cobertura de datos, warnings, errores, outputs generados, confirmación de seguridad y recomendación de siguiente acción.
+
+### Qué hacer si falta CSV
+
+Si se ejecuta con `--require-manual-csv` y falta el archivo esperado, el preflight queda `FAIL`. Crear el CSV en la ruta configurada por `market_data.manual_csv_path` o ajustar manualmente esa ruta en `config/config_demo.yaml`. El archivo debe tener las columnas mínimas indicadas y no debe inventar datos faltantes.
+
+### Qué hacer si falta cobertura
+
+Si falta cobertura de activos o benchmarks, revisar `preflight_report.*`, `run_control_report.*`, `real_data_pilot_report.*`, `data_quality_report.json` y los logs de la corrida. La Fase 11 permite continuar con warnings solo con `--allow-warning-run`; no amplía automáticamente a `broad_market`, no inventa precios y no mezcla benchmarks con activos invertibles.
+
+### Límites explícitos de Fase 11
+
+- Sin broker.
+- Sin órdenes reales.
+- `real_order` siempre `false`.
+- Sin GitHub Actions nuevos ni cron.
+- Sin `decision_agent` real.
+- Sin `audit_agent` real.
+- Sin modificación automática de `config/config_demo.yaml` ni reglas humanas.
+- Sin secretos hardcodeados.
+- Sin ampliar automáticamente el universo a `broad_market`.
