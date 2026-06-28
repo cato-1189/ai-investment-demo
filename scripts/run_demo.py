@@ -476,6 +476,11 @@ def market_data_settings(config: dict[str, Any]) -> dict[str, Any]:
         "mode": "fixture",
         "enabled": False,
         "provider": "fixture",
+        "provider_priority": ["stooq_csv", "manual_csv"],
+        "minimum_real_data_coverage_pct": 0.60,
+        "allow_manual_csv_fallback": False,
+        "manual_csv_path": "data/manual_market_data/{date}/market_data.csv",
+        "fail_if_no_real_prices": True,
         "fallback_to_fixture": True,
         "block_on_low_quality": True,
         "min_quality_for_scoring": "MEDIUM",
@@ -502,8 +507,14 @@ def validate_market_data_safety(config: dict[str, Any]) -> list[str]:
         errors.append("market_data.mode=real requiere market_data.enabled=true explícito")
     if settings.get("enabled") and settings.get("mode") != "real":
         errors.append("market_data.enabled=true requiere market_data.mode=real explícito")
-    if settings.get("provider") not in {"fixture", "stooq_csv"}:
-        errors.append(f"market_data.provider no soportado en Fase 6: {settings.get('provider')}")
+    supported = {"fixture", "stooq_csv", "manual_csv"}
+    if settings.get("provider") not in supported:
+        errors.append(f"market_data.provider no soportado: {settings.get('provider')}")
+    for provider in settings.get("provider_priority", []):
+        if provider not in supported - {"fixture"}:
+            errors.append(f"market_data.provider_priority contiene proveedor no soportado: {provider}")
+    if settings.get("mode") == "real" and "manual_csv" in settings.get("provider_priority", []) and not settings.get("allow_manual_csv_fallback"):
+        errors.append("manual_csv en provider_priority requiere allow_manual_csv_fallback=true")
     return errors
 
 
@@ -527,11 +538,71 @@ def fetch_stooq_csv(universe: list[dict[str, Any]], today: str, timeout: int) ->
                 text = response.read().decode("utf-8")
             parsed = list(csv.DictReader(text.splitlines()))
             raw = parsed[0] if parsed else {}
-            rows.append({"ticker": ticker, "provider_symbol": symbol, "url": url, "raw": raw})
+            rows.append({"ticker": ticker, "provider": "stooq_csv", "provider_symbol": symbol, "url": url, "raw": raw})
         except Exception as exc:
             errors.append({"ticker": ticker, "provider_symbol": symbol, "error": str(exc)})
     return {"provider": "stooq_csv", "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": rows, "errors": errors}
 
+
+
+def manual_csv_path(settings: dict[str, Any], today: str) -> Path:
+    configured = str(settings.get("manual_csv_path") or "data/manual_market_data/{date}/market_data.csv").format(date=today)
+    path = Path(configured)
+    return path if path.is_absolute() else ROOT / path
+
+
+def fetch_manual_csv(universe: list[dict[str, Any]], today: str, settings: dict[str, Any]) -> dict[str, Any]:
+    path = manual_csv_path(settings, today)
+    wanted = {item["ticker"] if isinstance(item, dict) else str(item) for item in universe}
+    required = {"ticker", "date", "close", "volume", "currency", "source"}
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    if not path.exists():
+        return {"provider": "manual_csv", "as_of_date": today, "fetched_at": utc_now().isoformat(), "path": str(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path), "assets": [], "errors": [{"provider": "manual_csv", "error": "manual CSV no encontrado"}]}
+    # Sniff delimiter from the header, then parse the file once.
+    sample = path.read_text(encoding="utf-8").splitlines()[:1]
+    delimiter = ";" if sample and ";" in sample[0] else ","
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        missing_cols = sorted(required - set(reader.fieldnames or []))
+        if missing_cols:
+            return {"provider": "manual_csv", "as_of_date": today, "fetched_at": utc_now().isoformat(), "path": str(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path), "assets": [], "errors": [{"provider": "manual_csv", "error": f"columnas faltantes: {missing_cols}"}]}
+        for record in reader:
+            ticker = (record.get("ticker") or "").strip().upper()
+            if ticker not in wanted:
+                continue
+            raw = {"Symbol": ticker, "Date": (record.get("date") or "").strip(), "Close": (record.get("close") or "").strip(), "Volume": (record.get("volume") or "").strip(), "Currency": (record.get("currency") or "").strip(), "Source": (record.get("source") or "").strip()}
+            rows.append({"ticker": ticker, "provider": "manual_csv", "provider_symbol": ticker, "path": str(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path), "raw": raw})
+    present = {r["ticker"] for r in rows}
+    for ticker in sorted(wanted - present):
+        errors.append({"ticker": ticker, "provider": "manual_csv", "error": "ticker no presente en CSV manual"})
+    return {"provider": "manual_csv", "as_of_date": today, "fetched_at": utc_now().isoformat(), "path": str(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path), "assets": rows, "errors": errors}
+
+
+def fetch_real_multi_provider(universe: list[dict[str, Any]], today: str, settings: dict[str, Any]) -> dict[str, Any]:
+    pending = list(universe)
+    assets: list[dict[str, Any]] = []
+    provider_errors: list[dict[str, Any]] = []
+    provider_payloads: list[dict[str, Any]] = []
+    coverage_by_provider: dict[str, list[str]] = {}
+    for provider in settings.get("provider_priority") or [settings.get("provider", "stooq_csv")]:
+        if provider == "manual_csv" and not settings.get("allow_manual_csv_fallback"):
+            provider_errors.append({"provider": provider, "error": "fallback CSV manual no habilitado"})
+            continue
+        payload = fetch_stooq_csv(pending, today, int(settings.get("timeout_seconds", 20))) if provider == "stooq_csv" else fetch_manual_csv(pending, today, settings)
+        provider_payloads.append(payload)
+        provider_errors.extend([{**e, "provider": e.get("provider", provider)} for e in payload.get("errors", [])])
+        normalized, _ = normalize_market_data(payload, {"market_data": settings}, today)
+        good = {a["ticker"] for a in normalized if not a.get("missing_fields") and a.get("data_quality") in {"MEDIUM", "HIGH"}}
+        coverage_by_provider[provider] = sorted(good)
+        assets.extend([r for r in payload.get("assets", []) if r.get("ticker") in good])
+        pending = [item for item in pending if (item["ticker"] if isinstance(item, dict) else str(item)) not in good]
+        if not pending:
+            break
+    for item in pending:
+        ticker = item["ticker"] if isinstance(item, dict) else str(item)
+        provider_errors.append({"ticker": ticker, "provider": "multi_provider", "error": "sin datos válidos en proveedores configurados"})
+    return {"provider": "multi_provider", "provider_priority": settings.get("provider_priority"), "minimum_real_data_coverage_pct": settings.get("minimum_real_data_coverage_pct"), "fail_if_no_real_prices": settings.get("fail_if_no_real_prices"), "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": assets, "errors": provider_errors, "provider_payloads": provider_payloads, "coverage_by_provider": coverage_by_provider, "manual_csv_used": bool(coverage_by_provider.get("manual_csv"))}
 
 def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], today: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if raw_payload["provider"] == "fixture":
@@ -578,9 +649,10 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
         # Fundamentals remain from fixture baseline and are explicitly estimated, never invented as real.
         estimated = [f"metrics.{k}" for k in base.get("metrics", {})]
         quality = "HIGH" if not missing and len(estimated) == 0 else "MEDIUM" if not missing else "LOW"
-        base.update({"data_source": "real_provider_with_fixture_fundamentals" if estimated else "real_provider", "provider": raw_payload["provider"], "provider_date": raw.get("Date"), "as_of_date": today, "data_quality": quality, "estimated_fields": estimated, "missing_fields": sorted(set(missing)), "provider_errors": errors})
+        provider_name = row.get("provider", raw_payload["provider"])
+        base.update({"data_source": "real_provider_with_fixture_fundamentals" if estimated else "real_provider", "provider": provider_name, "provider_date": raw.get("Date"), "as_of_date": today, "data_quality": quality, "estimated_fields": estimated, "missing_fields": sorted(set(missing)), "provider_errors": errors})
         assets.append(base)
-    error_by_ticker = {e.get("ticker"): e.get("error") for e in raw_payload.get("errors", [])}
+    error_by_ticker = {e.get("ticker"): e.get("error") for e in raw_payload.get("errors", []) if e.get("ticker")}
     for ticker, error in error_by_ticker.items():
         if ticker not in {a["ticker"] for a in assets}:
             base = json.loads(json.dumps(fixture_by_ticker.get(ticker, {"ticker": ticker, "company": ticker, "country": "US", "market": "US", "sector": "Unknown", "currency": "USD", "metrics": {"pe_ttm": 15.0, "ev_ebitda": 9.0, "fcf_yield": 0.04, "roe": 0.10, "revenue_growth": 0.04, "net_debt_ebitda": 2.0, "momentum_6m": 0.0, "drawdown_52w": -0.10}})))
@@ -594,7 +666,7 @@ def load_market_data(config: dict[str, Any], today: str, run_id: str, log_path: 
     provider = "fixture" if not settings.get("enabled") else settings.get("provider")
     append_jsonl(log_path, {"event": "market_data_started", "run_id": run_id, "provider": provider, "mode": settings.get("mode")})
     try:
-        raw = fixture_raw_payload(today) if provider == "fixture" else fetch_stooq_csv(settings.get("universe", []), today, int(settings.get("timeout_seconds", 20)))
+        raw = fixture_raw_payload(today) if provider == "fixture" else fetch_real_multi_provider(settings.get("universe", []), today, settings)
         if provider == "fixture":
             wanted = {item["ticker"] for item in settings.get("universe", [])}
             metadata = {item["ticker"]: item for item in settings.get("universe", [])}
@@ -1689,7 +1761,7 @@ def main() -> int:
     parser.add_argument("--real-data-pilot", action="store_true", help="Activa explícitamente piloto controlado con stooq_csv; paper trading, sin broker y sin órdenes reales.")
     args = parser.parse_args()
     today = args.date
-    stamp = utc_now().strftime("%H%M%S")
+    stamp = utc_now().strftime("%H%M%S%f")
     run_id = f"{today}_demo_phase8_{stamp}"
 
     config = load_config()
@@ -1702,7 +1774,7 @@ def main() -> int:
     if args.real_data_pilot:
         if not args.universe_symbols:
             raise SystemExit("--real-data-pilot requiere --universe-symbols explícito; no se amplía el universo automáticamente.")
-        config["market_data"] = {**config.get("market_data", {}), "mode": "real", "enabled": True, "provider": "stooq_csv", "fallback_to_fixture": False, "universe": []}
+        config["market_data"] = {**config.get("market_data", {}), "mode": "real", "enabled": True, "provider": "stooq_csv", "fallback_to_fixture": False, "allow_manual_csv_fallback": True, "universe": []}
         config["llm"] = {**config.get("llm", {}), "enabled": False, "real_agents": []}
     errors = validate_demo_safety(config) + validate_market_data_safety(config) + validate_llm_safety(config)
     if errors:

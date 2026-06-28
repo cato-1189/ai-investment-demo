@@ -32,7 +32,12 @@ markets:
 market_data:
   mode: "fixture"        # fixture | real
   enabled: false          # debe ser true junto con mode=real para usar proveedor externo
-  provider: "fixture"    # fixture | stooq_csv
+  provider: "fixture"    # fixture | stooq_csv | manual_csv
+  provider_priority: ["stooq_csv", "manual_csv"]
+  minimum_real_data_coverage_pct: 0.60
+  allow_manual_csv_fallback: false
+  manual_csv_path: "data/manual_market_data/{date}/market_data.csv"
+  fail_if_no_real_prices: true
   fallback_to_fixture: true
   block_on_low_quality: true
   min_quality_for_scoring: "MEDIUM"

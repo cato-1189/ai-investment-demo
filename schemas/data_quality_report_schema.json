@@ -23,7 +23,9 @@
       "type": "string",
       "enum": [
         "local_fixture",
-        "stooq_csv"
+        "stooq_csv",
+        "manual_csv",
+        "multi_provider"
       ]
     },
     "total_assets_checked": {

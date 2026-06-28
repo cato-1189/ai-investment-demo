@@ -46,6 +46,13 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
     scored = {row.get("ticker") for row in scoring}
     normalized_by_ticker = {row.get("ticker"): row for row in normalized}
     available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and not normalized_by_ticker[t].get("missing_fields") and normalized_by_ticker[t].get("data_source") != "real_provider_failed")
+    provider_by_ticker = {t: normalized_by_ticker[t].get("provider") for t in available if t in normalized_by_ticker}
+    coverage_by_provider = {}
+    for ticker, provider in provider_by_ticker.items():
+        coverage_by_provider.setdefault(provider or "unknown", []).append(ticker)
+    coverage_by_provider = {k: sorted(v) for k, v in sorted(coverage_by_provider.items())}
+    coverage_pct = round(len(available) / len(INVESTABLE), 4) if INVESTABLE else 0.0
+    minimum_coverage_pct = float(raw.get("minimum_real_data_coverage_pct") or 0.60)
     blocked = sorted(set(dq.get("investable_assets_blocked", [])))
     missing = sorted(t for t in INVESTABLE if t not in available)
     bench_avail = sorted(set(dq.get("benchmarks_available", [])) & set(BENCHMARKS))
@@ -53,6 +60,8 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
     benchmarks_in_scoring = sorted(set(BENCHMARKS) & scored)
     real_values = sorted({str(r.get("real_order")).lower() for r in trades})
     warnings = []
+    if coverage_pct < minimum_coverage_pct and available:
+        warnings.append({"name": "minimum_real_data_coverage_not_met", "coverage_pct": coverage_pct, "minimum_real_data_coverage_pct": minimum_coverage_pct})
     if missing:
         warnings.append({"name": "investable_data_missing_or_insufficient", "tickers": missing})
     if bench_missing:
@@ -60,6 +69,8 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
     if blocked:
         warnings.append({"name": "assets_blocked_before_scoring", "tickers": blocked})
     errors = []
+    if not available and raw.get("fail_if_no_real_prices", True):
+        errors.append("no hay datos reales para ningún activo invertible")
     if manifest.get("broker_connected") is not False:
         errors.append("broker_connected debe ser false")
     if manifest.get("allow_real_orders") is not False:
@@ -80,6 +91,12 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
         "command": command,
         "output_root": str(out_root.relative_to(ROOT)),
         "provider": raw.get("provider"),
+        "provider_priority": raw.get("provider_priority", []),
+        "manual_csv_used": bool(raw.get("manual_csv_used")),
+        "coverage_by_provider": coverage_by_provider,
+        "provider_by_ticker": provider_by_ticker,
+        "real_data_coverage_pct": coverage_pct,
+        "minimum_real_data_coverage_pct": minimum_coverage_pct,
         "requested_tickers": INVESTABLE,
         "requested_benchmarks": BENCHMARKS,
         "tickers_with_real_data_available": available,
@@ -100,7 +117,7 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
         "stderr": stderr,
     }
     (out_root / "real_data_pilot_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    lines = ["# Reporte piloto con datos reales - Fase 10", "", f"- Estado: **{report['status']}**", f"- Proveedor: `{report['provider']}`", f"- Outputs: `{report['output_root']}`", "", "## Cobertura", f"- Tickers solicitados: {', '.join(INVESTABLE)}", f"- Con datos reales disponibles: {', '.join(available) or 'ninguno'}", f"- Sin datos o insuficientes: {', '.join(missing) or 'ninguno'}", f"- Bloqueados: {', '.join(blocked) or 'ninguno'}", f"- Benchmarks disponibles: {', '.join(bench_avail) or 'ninguno'}", f"- Benchmarks faltantes: {', '.join(bench_missing) or 'ninguno'}", "", "## Scoring", f"- Enviados a scoring: {', '.join(sorted(scored)) or 'ninguno'}", f"- Excluidos del scoring: {', '.join(report['assets_excluded_from_scoring']) or 'ninguno'}", f"- Benchmarks en scoring: {benchmarks_in_scoring}", "", "## Seguridad", f"- Broker conectado: `{manifest.get('broker_connected')}`", f"- allow_real_orders: `{manifest.get('allow_real_orders')}`", f"- real_order observado: `{real_values}`", "- decision_agent y audit_agent permanecen mock.", "", "## Warnings y errores", f"- Warnings: `{warnings}`", f"- Errores: `{errors}`"]
+    lines = ["# Reporte piloto con datos reales - Fase 10", "", f"- Estado: **{report['status']}**", f"- Proveedor: `{report['provider']}`", f"- Prioridad de proveedores: `{report['provider_priority']}`", f"- CSV manual usado: `{report['manual_csv_used']}`", f"- Outputs: `{report['output_root']}`", "", "## Cobertura", f"- Cobertura total invertible: {coverage_pct:.0%} (mínimo {minimum_coverage_pct:.0%})", f"- Cobertura por proveedor: `{coverage_by_provider}`", f"- Tickers solicitados: {', '.join(INVESTABLE)}", f"- Con datos reales disponibles: {', '.join(available) or 'ninguno'}", f"- Sin datos o insuficientes: {', '.join(missing) or 'ninguno'}", f"- Bloqueados: {', '.join(blocked) or 'ninguno'}", f"- Benchmarks disponibles: {', '.join(bench_avail) or 'ninguno'}", f"- Benchmarks faltantes: {', '.join(bench_missing) or 'ninguno'}", "", "## Scoring", f"- Enviados a scoring: {', '.join(sorted(scored)) or 'ninguno'}", f"- Excluidos del scoring: {', '.join(report['assets_excluded_from_scoring']) or 'ninguno'}", f"- Benchmarks en scoring: {benchmarks_in_scoring}", "", "## Seguridad", f"- Broker conectado: `{manifest.get('broker_connected')}`", f"- allow_real_orders: `{manifest.get('allow_real_orders')}`", f"- real_order observado: `{real_values}`", "- decision_agent y audit_agent permanecen mock.", "", "## Warnings y errores", f"- Warnings: `{warnings}`", f"- Errores: `{errors}`"]
     (out_root / "real_data_pilot_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report
 
