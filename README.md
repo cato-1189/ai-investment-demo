@@ -203,3 +203,9 @@ market_data:
 ### Reporte de cobertura del universo
 
 Cada corrida genera `outputs/daily_runs/<YYYY-MM-DD>/<run_id>/universe_coverage_report.json` y también incluye el mismo resumen dentro de `data_quality_report.json` bajo `universe_coverage`. El reporte muestra total cargado, elegibles, bloqueados, sin datos, baja liquidez, sin soporte del proveedor, enviados a scoring y enviados a research.
+
+## Fase 7: forward-test, post-mortem y aprendizaje metodológico
+
+La Fase 7 evalúa ventanas vencidas de 3, 6 y 12 meses desde `memory/forward_test_pending.csv`, escribe resultados en `memory/forward_test_results.csv` y genera un post-mortem por corrida en `forward_test_postmortem.md`. Si faltan precios, la fila queda como `NOT_EVALUABLE`; no se inventan datos. Las recomendaciones metodológicas se agregan a memoria externa como sugerencias y no modifican reglas ni `config_demo.yaml` automáticamente.
+
+Ver `docs/forward_test_phase7.md` para la interpretación de hit rate, decisiones aprobadas/bloqueadas y uso de benchmarks.
