@@ -51,18 +51,35 @@ market_data:
   min_quality_for_scoring: "MEDIUM"
   snapshot_folder: "data/snapshots"
   timeout_seconds: 20
+  max_price_age_days: 7
+  max_fundamentals_age_days: 120
+  minimum_provider_success_rate: 0.60
+  retry_attempts: 1
+  retry_backoff_seconds: 0.0
+  provider_timeout_seconds: 20
+  block_stale_prices: false
+  block_stale_fundamentals: false
   universe_mode: "demo_small"
   universe: []  # Compatibilidad legacy; Fase 6B usa universe_modes.<modo>.
   providers:
     stooq_csv:
       requires_api_key: false
       base_url: "https://stooq.com"
+      retry_attempts: 1
+      retry_backoff_seconds: 0.0
+      provider_timeout_seconds: 20
     manual_csv:
       requires_api_key: false
+      retry_attempts: 1
+      retry_backoff_seconds: 0.0
+      provider_timeout_seconds: 20
     yfinance:
       requires_api_key: false
       official_provider: false
       enabled_by_default: false
+      retry_attempts: 1
+      retry_backoff_seconds: 0.0
+      provider_timeout_seconds: 20
 
 # Fase 11B: política de data readiness para preflight del controlled pilot.
 # No habilita broker, órdenes reales, GitHub Actions ni cron.
