@@ -13,6 +13,7 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+import concurrent.futures
 from pathlib import Path
 from typing import Any, Callable
 
@@ -523,6 +524,11 @@ def has_sufficient_data_for_scoring(asset: dict[str, Any], config: dict[str, Any
     required_ok = all(not is_missing_value(asset.get(k)) for k in required)
     if settings.get("fail_if_required_financial_fields_missing", True) and (asset.get("missing_fields") or not required_ok):
         return False
+    freshness = asset.get("freshness") or {}
+    if settings.get("block_stale_prices") and freshness.get("stale_price"):
+        return False
+    if settings.get("block_stale_fundamentals") and freshness.get("stale_fundamentals"):
+        return False
     thresholds = {
         "price_data": settings.get("minimum_price_coverage_pct", 0.0),
         "fundamentals_data": settings.get("minimum_fundamentals_coverage_pct", 0.0),
@@ -535,6 +541,35 @@ def has_sufficient_data_for_scoring(asset: dict[str, Any], config: dict[str, Any
         if threshold is not None and float(threshold) > 0 and _coverage_for_category(asset, category, threshold) < float(threshold):
             return False
     return order.get(asset.get("data_quality", "LOW"), 0) >= order.get(minimum, 1)
+
+
+def parse_iso_date(value: Any) -> dt.date | None:
+    if is_missing_value(value):
+        return None
+    try:
+        return dt.date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def annotate_freshness(asset: dict[str, Any], settings: dict[str, Any], today: str) -> dict[str, Any]:
+    asof = dt.date.fromisoformat(today)
+    price_date = parse_iso_date(asset.get("provider_date") or field_value((asset.get("price_data") or {}).get("provider_date")))
+    query_ts = None
+    for group in ["price_data", "fundamentals_data", "ratios_data"]:
+        for field in (asset.get(group) or {}).values():
+            if isinstance(field, dict) and field.get("timestamp"):
+                query_ts = field.get("timestamp")
+                break
+        if query_ts:
+            break
+    fundamentals_dates = [parse_iso_date(v.get("timestamp")) for v in (asset.get("fundamentals_data") or {}).values() if isinstance(v, dict) and not v.get("is_missing")]
+    fundamentals_date = max([d for d in fundamentals_dates if d], default=None)
+    price_age = (asof - price_date).days if price_date else None
+    fund_age = (asof - fundamentals_date).days if fundamentals_date else None
+    stale_price = price_age is None or price_age > int(settings.get("max_price_age_days", 7) or 7)
+    stale_fund = bool(fundamentals_date and fund_age is not None and fund_age > int(settings.get("max_fundamentals_age_days", 120) or 120))
+    return {"price_date": price_date.isoformat() if price_date else None, "fundamentals_date": fundamentals_date.isoformat() if fundamentals_date else None, "query_timestamp": query_ts, "price_age_days": price_age, "fundamentals_age_days": fund_age, "stale_price": stale_price, "stale_fundamentals": stale_fund, "stale_data": bool(stale_price or stale_fund)}
 
 
 class MarketDataProviderError(RuntimeError):
@@ -564,6 +599,14 @@ def market_data_settings(config: dict[str, Any]) -> dict[str, Any]:
         "min_quality_for_scoring": "MEDIUM",
         "snapshot_folder": "data/snapshots",
         "timeout_seconds": 20,
+        "max_price_age_days": 7,
+        "max_fundamentals_age_days": 120,
+        "minimum_provider_success_rate": 0.60,
+        "retry_attempts": 1,
+        "retry_backoff_seconds": 0.0,
+        "provider_timeout_seconds": None,
+        "block_stale_prices": False,
+        "block_stale_fundamentals": False,
         "universe": [],
         "providers": {},
     }
@@ -709,6 +752,46 @@ def fetch_yfinance(universe: list[dict[str, Any]], today: str, settings: dict[st
             errors.append({"ticker": ticker, "provider": "yfinance", "error": str(exc)})
     return {"provider": "yfinance", "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": rows, "errors": errors}
 
+def provider_setting(settings: dict[str, Any], provider: str, key: str, default: Any = None) -> Any:
+    return (settings.get("providers", {}).get(provider, {}) or {}).get(key, settings.get(key, default))
+
+
+def run_provider_with_resilience(provider: str, fetcher: Callable[[], dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
+    attempts = max(1, int(provider_setting(settings, provider, "retry_attempts", 1) or 1))
+    backoff = float(provider_setting(settings, provider, "retry_backoff_seconds", 0.0) or 0.0)
+    timeout = provider_setting(settings, provider, "provider_timeout_seconds", None) or provider_setting(settings, provider, "timeout_seconds", None)
+    started = time.time()
+    errors: list[dict[str, Any]] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            if timeout:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(fetcher)
+                    payload = future.result(timeout=float(timeout))
+            else:
+                payload = fetcher()
+            payload["attempts"] = attempt
+            payload["duration_seconds"] = round(time.time() - started, 3)
+            return payload
+        except concurrent.futures.TimeoutError:
+            errors.append({"provider": provider, "attempt": attempt, "error": f"timeout después de {timeout}s"})
+        except Exception as exc:
+            errors.append({"provider": provider, "attempt": attempt, "error": str(exc), "exception": exc.__class__.__name__})
+        if attempt < attempts and backoff > 0:
+            time.sleep(backoff * attempt)
+    return {"provider": provider, "as_of_date": None, "fetched_at": utc_now().isoformat(), "assets": [], "errors": errors, "attempts": attempts, "duration_seconds": round(time.time() - started, 3)}
+
+
+def provider_health_from_payload(provider: str, requested: list[str], payload: dict[str, Any], normalized: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
+    covered = sorted({a.get("ticker") for a in normalized if a.get("ticker") in set(requested) and not a.get("missing_fields") and a.get("data_quality") in {"MEDIUM", "HIGH"}})
+    fields = ["price_close", "avg_volume_usd", "provider_date", "totalRevenue", "netIncome", "stockholdersEquity", "totalDebt", "freeCashFlow", "pe_ttm", "ev_ebitda", "fcf_yield", "roe", "revenue_growth", "net_debt_ebitda"]
+    missing_fields = sorted({f for a in normalized if a.get("ticker") in set(requested) for f in a.get("missing_fields", [])})
+    success_rate = round(len(covered) / len(requested), 4) if requested else 1.0
+    minimum = float(settings.get("minimum_provider_success_rate", 0.60) or 0.60)
+    status = "HEALTHY" if success_rate >= minimum and not payload.get("errors") else "DEGRADED" if covered else "FAILED"
+    return {"provider": provider, "timestamp": payload.get("fetched_at", utc_now().isoformat()), "tickers_requested": requested, "tickers_covered": covered, "tickers_failed": sorted(set(requested) - set(covered)), "fields_covered": sorted(set(fields) - set(missing_fields)), "fields_missing": missing_fields, "errors": payload.get("errors", []), "duration_seconds": payload.get("duration_seconds"), "attempts": payload.get("attempts", 1), "success_rate": success_rate, "provider_status": status}
+
+
 def fetch_real_multi_provider(universe: list[dict[str, Any]], today: str, settings: dict[str, Any]) -> dict[str, Any]:
     pending = list(universe)
     assets: list[dict[str, Any]] = []
@@ -721,15 +804,18 @@ def fetch_real_multi_provider(universe: list[dict[str, Any]], today: str, settin
             provider_errors.append({"provider": provider, "error": "fallback CSV manual no habilitado"})
             continue
         if provider == "stooq_csv":
-            payload = fetch_stooq_csv(pending, today, int(settings.get("timeout_seconds", 20)))
+            fetcher = lambda provider=provider, pending=pending: fetch_stooq_csv(pending, today, int(provider_setting(settings, provider, "timeout_seconds", settings.get("timeout_seconds", 20)) or 20))
         elif provider == "yfinance":
-            payload = fetch_yfinance(pending, today, settings)
+            fetcher = lambda pending=pending: fetch_yfinance(pending, today, settings)
         else:
-            payload = fetch_manual_csv(pending, today, settings)
+            fetcher = lambda pending=pending: fetch_manual_csv(pending, today, settings)
+        requested = [item["ticker"] if isinstance(item, dict) else str(item) for item in pending]
+        payload = run_provider_with_resilience(provider, fetcher, settings)
         provider_payloads.append(payload)
         provider_errors.extend([{**e, "provider": e.get("provider", provider)} for e in payload.get("errors", [])])
         normalized, _ = normalize_market_data(payload, {"market_data": settings}, today)
         good = {a["ticker"] for a in normalized if not a.get("missing_fields") and a.get("data_quality") in {"MEDIUM", "HIGH"}}
+        payload["provider_health"] = provider_health_from_payload(provider, requested, payload, normalized, settings)
         coverage_by_provider[provider] = sorted(good)
         assets.extend([r for r in payload.get("assets", []) if r.get("ticker") in good])
         pending = [item for item in pending if (item["ticker"] if isinstance(item, dict) else str(item)) not in good]
@@ -738,7 +824,7 @@ def fetch_real_multi_provider(universe: list[dict[str, Any]], today: str, settin
     for item in pending:
         ticker = item["ticker"] if isinstance(item, dict) else str(item)
         provider_errors.append({"ticker": ticker, "provider": "multi_provider", "error": "sin datos válidos en proveedores configurados"})
-    return {"provider": settings.get("provider") if settings.get("provider") in {"yfinance", "manual_csv"} else "multi_provider", "provider_priority": provider_sequence, "minimum_real_data_coverage_pct": settings.get("minimum_real_data_coverage_pct"), "fail_if_no_real_prices": settings.get("fail_if_no_real_prices"), "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": assets, "errors": provider_errors, "provider_payloads": provider_payloads, "coverage_by_provider": coverage_by_provider, "manual_csv_used": bool(coverage_by_provider.get("manual_csv"))}
+    return {"provider": settings.get("provider") if settings.get("provider") in {"yfinance", "manual_csv"} else "multi_provider", "provider_priority": provider_sequence, "minimum_real_data_coverage_pct": settings.get("minimum_real_data_coverage_pct"), "fail_if_no_real_prices": settings.get("fail_if_no_real_prices"), "as_of_date": today, "fetched_at": utc_now().isoformat(), "assets": assets, "errors": provider_errors, "provider_payloads": provider_payloads, "provider_health": [p.get("provider_health") for p in provider_payloads if p.get("provider_health")], "coverage_by_provider": coverage_by_provider, "manual_csv_used": bool(coverage_by_provider.get("manual_csv"))}
 
 def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], today: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if raw_payload["provider"] == "fixture":
@@ -752,7 +838,9 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
             cloned["ratios_data"] = {k: financial_field(v, "fixture", ts) for k, v in (cloned.get("metrics") or {}).items()}
             cloned["metadata_data"] = {k: financial_field(cloned.get(k), "fixture", ts) for k in ["company", "sector", "industry", "country", "currency"]}
             cloned["corporate_actions"] = {}
-            cloned.update({"data_source": "fixture", "as_of_date": today, "estimated_fields": [], "missing_fields": [], "provider_errors": []})
+            cloned.update({"data_source": "fixture", "as_of_date": today, "provider_date": today, "estimated_fields": [], "missing_fields": [], "provider_errors": []})
+            cloned["freshness"] = annotate_freshness(cloned, market_data_settings(config), today)
+            cloned["stale_data"] = cloned["freshness"]["stale_data"]
             assets.append(cloned)
         return assets, build_data_quality_report([], "pending", today, assets, raw_payload)
 
@@ -825,14 +913,43 @@ def normalize_market_data(raw_payload: dict[str, Any], config: dict[str, Any], t
         base["corporate_actions"] = {}
         quality = "HIGH" if not missing and len(estimated) == 0 else "MEDIUM" if not missing else "LOW"
         base.update({"data_source": "real_provider_with_fixture_fundamentals" if estimated else "real_provider", "provider": provider_name, "provider_date": raw.get("Date"), "as_of_date": today, "data_quality": quality, "estimated_fields": estimated, "missing_fields": sorted(set(missing)), "provider_errors": errors})
+        base["freshness"] = annotate_freshness(base, market_data_settings(config), today)
+        base["stale_data"] = base["freshness"]["stale_data"]
         assets.append(base)
     error_by_ticker = {e.get("ticker"): e.get("error") for e in raw_payload.get("errors", []) if e.get("ticker")}
     for ticker, error in error_by_ticker.items():
         if ticker not in {a["ticker"] for a in assets}:
             base = json.loads(json.dumps(fixture_by_ticker.get(ticker, {"ticker": ticker, "company": ticker, "country": "US", "market": "US", "sector": "Unknown", "currency": "USD", "metrics": {"pe_ttm": 15.0, "ev_ebitda": 9.0, "fcf_yield": 0.04, "roe": 0.10, "revenue_growth": 0.04, "net_debt_ebitda": 2.0, "momentum_6m": 0.0, "drawdown_52w": -0.10}})))
             base.update({"data_source": "real_provider_failed", "provider": raw_payload["provider"], "as_of_date": today, "data_quality": "LOW", "estimated_fields": [], "missing_fields": required, "provider_errors": [error]})
+            base["freshness"] = annotate_freshness(base, market_data_settings(config), today)
+            base["stale_data"] = base["freshness"]["stale_data"]
             assets.append(base)
     return assets, build_data_quality_report([], "pending", today, assets, raw_payload)
+
+
+def build_provider_health_report(raw: dict[str, Any], today: str, run_id: str) -> dict[str, Any]:
+    reports = raw.get("provider_health") or [p.get("provider_health") for p in raw.get("provider_payloads", []) if p.get("provider_health")]
+    statuses = [r.get("provider_status") for r in reports]
+    overall = "FAILED" if statuses and all(s == "FAILED" for s in statuses) else "DEGRADED" if any(s in {"FAILED", "DEGRADED"} for s in statuses) else "HEALTHY"
+    return {"run_id": run_id, "date": today, "provider": raw.get("provider"), "provider_priority": raw.get("provider_priority", []), "overall_status": overall, "providers": reports, "generated_at": utc_now().isoformat()}
+
+
+def write_provider_health_markdown(path: Path, report: dict[str, Any]) -> None:
+    lines = [f"# Provider health - {report['date']}", "", f"- Estado general: **{report['overall_status']}**", f"- Proveedor: `{report.get('provider')}`", "", "| Provider | Status | Success rate | Covered | Failed | Attempts | Duration |", "|---|---|---:|---|---|---:|---:|"]
+    for item in report.get("providers", []):
+        lines.append(f"| {item.get('provider')} | {item.get('provider_status')} | {item.get('success_rate')} | {', '.join(item.get('tickers_covered', [])) or '-'} | {', '.join(item.get('tickers_failed', [])) or '-'} | {item.get('attempts')} | {item.get('duration_seconds')} |")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def persist_financial_history(today: str, run_id: str, normalized: list[dict[str, Any]], quality: dict[str, Any], health: dict[str, Any]) -> None:
+    total = len(normalized)
+    complete = len(quality.get("complete_assets", []))
+    stale = len([a for a in normalized if a.get("stale_data")])
+    append_csv_rows(ROOT / "memory" / "financial_data_coverage.csv", [{"date": today, "run_id": run_id, "total_assets": total, "complete_assets": complete, "coverage_pct": round(complete / total, 4) if total else 0.0, "stale_assets": stale, "source": quality.get("source")}], ["date", "run_id", "total_assets", "complete_assets", "coverage_pct", "stale_assets", "source"])
+    rows = [{"date": today, "run_id": run_id, "provider": p.get("provider"), "provider_status": p.get("provider_status"), "success_rate": p.get("success_rate"), "tickers_requested": len(p.get("tickers_requested", [])), "tickers_covered": len(p.get("tickers_covered", [])), "tickers_failed": len(p.get("tickers_failed", [])), "duration_seconds": p.get("duration_seconds")} for p in health.get("providers", [])]
+    if rows:
+        append_csv_rows(ROOT / "memory" / "provider_health_history.csv", rows, ["date", "run_id", "provider", "provider_status", "success_rate", "tickers_requested", "tickers_covered", "tickers_failed", "duration_seconds"])
 
 
 def load_market_data(config: dict[str, Any], today: str, run_id: str, log_path: Path, out_root: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str]]:
@@ -854,13 +971,23 @@ def load_market_data(config: dict[str, Any], today: str, run_id: str, log_path: 
         raw["fallback_reason"] = str(exc)
     normalized, quality = normalize_market_data(raw, config, today)
     quality.update({"run_id": run_id, "date": today})
+    health = build_provider_health_report(raw, today, run_id)
+    quality["provider_health"] = health
+    quality["freshness"] = {a.get("ticker"): a.get("freshness") for a in normalized}
+    quality["stale_data"] = sorted(a.get("ticker") for a in normalized if a.get("stale_data"))
     snap_dir = ROOT / settings.get("snapshot_folder", "data/snapshots") / today / run_id
     write_json(snap_dir / "raw_market_data.json", raw)
     write_json(snap_dir / "normalized_market_data.json", normalized)
     write_json(snap_dir / "data_quality_report.json", quality)
+    fin_snap_dir = ROOT / "data" / "financial_snapshots" / today / run_id
+    write_json(fin_snap_dir / "financial_data_normalized.json", normalized)
+    write_json(fin_snap_dir / "provider_health_report.json", health)
+    write_json(out_root / "provider_health_report.json", health)
+    write_provider_health_markdown(out_root / "provider_health_report.md", health)
+    persist_financial_history(today, run_id, normalized, quality, health)
     write_json(out_root / "snapshots" / "raw_market_data.json", raw)
     write_json(out_root / "snapshots" / "normalized_market_data.json", normalized)
-    paths = {"raw": str((snap_dir / "raw_market_data.json").relative_to(ROOT)), "normalized": str((snap_dir / "normalized_market_data.json").relative_to(ROOT)), "quality": str((snap_dir / "data_quality_report.json").relative_to(ROOT))}
+    paths = {"raw": str((snap_dir / "raw_market_data.json").relative_to(ROOT)), "normalized": str((snap_dir / "normalized_market_data.json").relative_to(ROOT)), "quality": str((snap_dir / "data_quality_report.json").relative_to(ROOT)), "financial_snapshot": str((fin_snap_dir / "financial_data_normalized.json").relative_to(ROOT)), "provider_health": str((fin_snap_dir / "provider_health_report.json").relative_to(ROOT))}
     append_jsonl(log_path, {"event": "market_data_finished", "run_id": run_id, "provider": raw.get("provider"), "assets": len(normalized), "blocked_assets": quality.get("blocked_assets", []), "snapshots": paths, "errors": raw.get("errors", [])})
     return normalized, quality, paths
 
@@ -1707,6 +1834,10 @@ def filter_assets_for_scoring(assets: list[dict[str, Any]], universes: dict[str,
             reason = "no_data"
         elif safe_float(asset.get("avg_volume_usd")) < float(filters.get("min_avg_volume_usd", 0)):
             reason = "low_liquidity"
+        elif market_data_settings(config).get("block_stale_prices") and (asset.get("freshness") or {}).get("stale_price"):
+            reason = "stale_price"
+        elif market_data_settings(config).get("block_stale_fundamentals") and (asset.get("freshness") or {}).get("stale_fundamentals"):
+            reason = "stale_fundamentals"
         elif order.get(asset.get("data_quality", "LOW"), 0) < order.get(min_quality, 1) or not has_sufficient_data_for_scoring(asset, config):
             reason = "insufficient_data_quality"
         if reason:
@@ -1868,6 +1999,10 @@ def build_data_quality_report(scored: list[dict[str, Any]], run_id: str, today: 
         "missing_data": missing,
         "estimated_data": estimated,
         "provider_errors": provider_errors,
+        "provider_health": (raw_payload or {}).get("provider_health", {}),
+        "freshness": {a.get("ticker"): a.get("freshness") for a in assets},
+        "stale_data": sorted(a.get("ticker") for a in assets if a.get("stale_data")),
+        "missing_fields_by_provider": {provider: sorted({f for a in assets if a.get("provider", provider) == provider for f in a.get("missing_fields", [])})},
         "blocked_assets": sorted(set(blocked)),
         "investable_assets_with_sufficient_data": sorted(set(complete) - set(blocked)),
         "investable_assets_blocked": sorted(set(blocked)),
@@ -1987,7 +2122,15 @@ def main() -> int:
     write_json(out_root / "forward_test_summary.json", {"date": today, "status": forward_test["status"], "metrics": forward_test["metrics"]})
     postmortem_path = write_forward_postmortem(out_root, run_id, today, forward_test)
     quality_provider = "fixture" if data_quality_report["source"] == "local_fixture" else data_quality_report["source"]
-    data_quality_report = build_data_quality_report(scored, run_id, today, assets, {"provider": quality_provider, "fetched_at": data_quality_report.get("data_timestamp_utc"), "errors": data_quality_report.get("provider_errors", [])})
+    provider_health = data_quality_report.get("provider_health", {})
+    freshness_report = data_quality_report.get("freshness", {})
+    stale_report = data_quality_report.get("stale_data", [])
+    data_quality_report = build_data_quality_report(scored, run_id, today, assets, {"provider": quality_provider, "fetched_at": data_quality_report.get("data_timestamp_utc"), "errors": data_quality_report.get("provider_errors", []), "provider_health": provider_health})
+    data_quality_report["provider_health"] = provider_health
+    data_quality_report["freshness"] = freshness_report
+    data_quality_report["stale_data"] = stale_report
+    data_quality_report["coverage_history_path"] = "memory/financial_data_coverage.csv"
+    data_quality_report["provider_health_history_path"] = "memory/provider_health_history.csv"
     coverage_report = build_universe_coverage_report(universes, assets, scoring_assets, candidates, pre_scoring_report, data_quality_report)
     data_quality_report["universe_coverage"] = coverage_report
     data_quality_report["snapshot_paths"] = {**snapshot_paths, **universe_snapshot_paths}

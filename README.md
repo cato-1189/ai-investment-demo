@@ -546,3 +546,36 @@ Si falta cobertura de activos o benchmarks, revisar `preflight_report.*`, `run_c
 - Sin modificación automática de `config/config_demo.yaml` ni reglas humanas.
 - Sin secretos hardcodeados.
 - Sin ampliar automáticamente el universo a `broad_market`.
+
+## Fase 12B: confiabilidad de proveedores financieros (DEMO)
+
+La Fase 12B fortalece la capa automática de datos financieros sin cambiar la naturaleza del proyecto: sigue siendo **DEMO / paper trading**, sin broker, sin órdenes reales, sin GitHub Actions, sin cron y con decision/audit agents mock por default.
+
+Qué agrega:
+
+- **Retries y backoff por proveedor:** si un proveedor falla, puede reintentarse la consulta según `market_data.retry_attempts` y `market_data.retry_backoff_seconds` o los overrides dentro de `market_data.providers.<provider>`.
+- **Timeout por proveedor:** cada proveedor puede cortarse con `provider_timeout_seconds` para evitar que una corrida quede colgada.
+- **Provider health:** cada corrida genera `provider_health_report.json` y `provider_health_report.md` con tickers solicitados, cubiertos, fallidos, campos cubiertos/faltantes, errores, duración, timestamp, success rate y estado `HEALTHY`, `DEGRADED` o `FAILED`.
+- **Freshness:** cada activo registra fecha de precio, fecha de fundamentals cuando existe, timestamp de consulta y `stale_data`. La política permite mostrar datos stale o bloquearlos antes del scoring con `block_stale_prices` y `block_stale_fundamentals`.
+- **Snapshots financieros normalizados:** además de los snapshots legacy, se guarda una copia histórica en `data/financial_snapshots/<fecha>/<run_id>/financial_data_normalized.json` y su health report.
+- **Memoria histórica resumida:** se agregan series simples en `memory/financial_data_coverage.csv` y `memory/provider_health_history.csv` para revisar evolución de cobertura y salud de proveedores.
+
+Los benchmarks siguen fuera del scoring por default y `yfinance` permanece deshabilitado salvo activación explícita. La capa queda preparada para nuevos proveedores, pero esta fase no agrega fuentes pagas ni credenciales.
+
+Comandos útiles:
+
+```bash
+# Demo normal con fixture/mock
+python scripts/run_demo.py --date 2026-06-29
+
+# Validación E2E fixture/mock
+python scripts/run_e2e_validation.py --date 2026-06-29
+
+# Piloto real best-effort, requiere activación explícita y puede fallar si el proveedor externo no responde o no cubre datos
+python scripts/run_real_data_pilot.py --date 2026-06-29 --activate-real-data-pilot
+
+# Controlled pilot; no arranca si el preflight falla
+python scripts/run_controlled_pilot.py --date 2026-06-29 --allow-warning-run
+```
+
+Limitaciones que se mantienen: no hay broker, `real_order` permanece `false`, no se inventan datos faltantes, no se ocultan errores de proveedor, y ningún benchmark se trata como activo invertible.

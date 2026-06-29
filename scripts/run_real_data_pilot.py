@@ -106,6 +106,7 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
     missing_outputs = [name for name in flow_outputs if not (out_root / name).exists()]
     if missing_outputs:
         errors.append(f"outputs faltantes: {missing_outputs}")
+    provider_health = read_json(out_root / "provider_health_report.json", {})
     report = {
         "phase": "FASE_10_REAL_DATA_PILOT",
         "status": "FAIL" if errors else "WARNING" if warnings else "PASS",
@@ -139,13 +140,16 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
         "errors": errors,
         "safety": {"broker_connected": manifest.get("broker_connected"), "allow_real_orders": manifest.get("allow_real_orders"), "real_order_values": real_values, "decision_agent": "mock", "audit_agent": "mock", "llms_used": manifest.get("llms_used")},
         "benchmarks_in_scoring": benchmarks_in_scoring,
+        "provider_health": provider_health,
+        "freshness": dq.get("freshness", {}),
+        "stale_data": dq.get("stale_data", []),
         "provider_errors": dq.get("provider_errors", []),
         "missing_data_detail": dq.get("missing_data", []),
         "stdout_tail": stdout.splitlines()[-20:],
         "stderr": stderr,
     }
     (out_root / "real_data_pilot_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    lines = ["# Reporte piloto con datos reales - Fase 10", "", f"- Estado: **{report['status']}**", f"- Proveedor: `{report['provider']}`", f"- Prioridad de proveedores: `{report['provider_priority']}`", f"- CSV manual usado: `{report['manual_csv_used']}`", f"- Outputs: `{report['output_root']}`", "", "## Cobertura", f"- Cobertura total invertible: {coverage_pct:.0%} (mínimo {minimum_coverage_pct:.0%})", f"- Cobertura por proveedor: `{coverage_by_provider}`", f"- Tickers solicitados: {', '.join(INVESTABLE)}", f"- Con datos reales disponibles: {', '.join(available) or 'ninguno'}", f"- Sin datos o insuficientes: {', '.join(missing) or 'ninguno'}", f"- Bloqueados: {', '.join(blocked) or 'ninguno'}", f"- Benchmarks disponibles: {', '.join(bench_avail) or 'ninguno'}", f"- Benchmarks faltantes: {', '.join(bench_missing) or 'ninguno'}", "", "## Scoring", f"- Enviados a scoring: {', '.join(sorted(scored)) or 'ninguno'}", f"- Excluidos del scoring: {', '.join(report['assets_excluded_from_scoring']) or 'ninguno'}", f"- Benchmarks en scoring: {benchmarks_in_scoring}", "", "## Seguridad", f"- Broker conectado: `{manifest.get('broker_connected')}`", f"- allow_real_orders: `{manifest.get('allow_real_orders')}`", f"- real_order observado: `{real_values}`", "- decision_agent y audit_agent permanecen mock.", "", "## Warnings y errores", f"- Warnings: `{warnings}`", f"- Errores: `{errors}`"]
+    lines = ["# Reporte piloto con datos reales - Fase 10", "", f"- Estado: **{report['status']}**", f"- Proveedor: `{report['provider']}`", f"- Prioridad de proveedores: `{report['provider_priority']}`", f"- CSV manual usado: `{report['manual_csv_used']}`", f"- Outputs: `{report['output_root']}`", "", "## Cobertura", f"- Cobertura total invertible: {coverage_pct:.0%} (mínimo {minimum_coverage_pct:.0%})", f"- Cobertura por proveedor: `{coverage_by_provider}`", f"- Tickers solicitados: {', '.join(INVESTABLE)}", f"- Con datos reales disponibles: {', '.join(available) or 'ninguno'}", f"- Sin datos o insuficientes: {', '.join(missing) or 'ninguno'}", f"- Bloqueados: {', '.join(blocked) or 'ninguno'}", f"- Benchmarks disponibles: {', '.join(bench_avail) or 'ninguno'}", f"- Benchmarks faltantes: {', '.join(bench_missing) or 'ninguno'}", "", "## Scoring", f"- Enviados a scoring: {', '.join(sorted(scored)) or 'ninguno'}", f"- Excluidos del scoring: {', '.join(report['assets_excluded_from_scoring']) or 'ninguno'}", f"- Benchmarks en scoring: {benchmarks_in_scoring}", "", "## Seguridad", f"- Broker conectado: `{manifest.get('broker_connected')}`", f"- allow_real_orders: `{manifest.get('allow_real_orders')}`", f"- real_order observado: `{real_values}`", "- decision_agent y audit_agent permanecen mock.", "", "## Provider health y freshness", f"- Provider health: `{provider_health.get('overall_status')}`", f"- Datos stale: `{dq.get('stale_data', [])}`", "", "## Warnings y errores", f"- Warnings: `{warnings}`", f"- Errores: `{errors}`"]
     (out_root / "real_data_pilot_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report
 
