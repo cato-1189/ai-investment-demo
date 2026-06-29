@@ -293,6 +293,12 @@ class Phase6BUniverseTests(unittest.TestCase):
 
     def test_investable_asset_enters_scoring_with_sufficient_data(self) -> None:
         asset = {**run_demo.read_json(run_demo.FIXTURE_PATH)[0], "eligible_for_investment": True, "instrument_type": "common_stock"}
+        asset.update({
+            "price_data": {"price_close": {"value": asset.get("price_close"), "is_missing": False}},
+            "fundamentals_data": {"totalRevenue": {"value": 1_000_000, "is_missing": False}},
+            "ratios_data": {"pe_ttm": {"value": asset.get("metrics", {}).get("pe_ttm", 20), "is_missing": False}},
+            "metadata_data": {"currency": {"value": asset.get("currency", "USD"), "is_missing": False}},
+        })
         self.assertTrue(run_demo.has_sufficient_data_for_scoring(asset, self.config))
         scored = run_demo.score_asset(asset, self.config["scoring_weights"])
         self.assertEqual(scored["ticker"], asset["ticker"])

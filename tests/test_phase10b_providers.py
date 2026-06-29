@@ -126,7 +126,8 @@ def test_data_quality_report_uses_full_universe_not_only_scored():
 def test_benchmarks_are_filtered_out_of_scoring():
     cfg = run_demo.load_config()
     universes = {"investable": [{"ticker": "AAPL"}], "benchmarks": [{"ticker": "SPY"}], "excluded": [], "filters": {"min_price": 1, "min_avg_volume_usd": 1, "min_data_quality": "MEDIUM"}}
-    assets = [{"ticker": "AAPL", "price_close": 200, "avg_volume_usd": 1_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": []}, {"ticker": "SPY", "price_close": 500, "avg_volume_usd": 1_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": []}]
+    complete_categories = {"price_data": {"price_close": {"value": 200, "is_missing": False}}, "fundamentals_data": {"totalRevenue": {"value": 1_000_000, "is_missing": False}}, "ratios_data": {"pe_ttm": {"value": 20, "is_missing": False}}, "metadata_data": {"currency": {"value": "USD", "is_missing": False}}}
+    assets = [{"ticker": "AAPL", "price_close": 200, "avg_volume_usd": 1_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": [], **complete_categories}, {"ticker": "SPY", "price_close": 500, "avg_volume_usd": 1_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": [], **complete_categories}]
     scoring, pre = run_demo.filter_assets_for_scoring(assets, universes, cfg)
     assert [a["ticker"] for a in scoring] == ["AAPL"]
     assert pre["blocked_before_scoring"][0]["reason"] == "benchmark_not_investable"
@@ -137,3 +138,9 @@ def test_fetch_yfinance_reports_module_not_found_when_not_installed():
     assert payload["provider"] == "yfinance"
     assert payload["assets"] == []
     assert payload["errors"][0]["exception"] == "ModuleNotFoundError"
+
+
+def test_required_missing_fundamentals_category_blocks_scoring():
+    asset = {"ticker": "AAPL", "price_close": 200, "avg_volume_usd": 1_000_000_000, "metrics": {"pe_ttm": 20}, "data_quality": "HIGH", "missing_fields": [], "price_data": {"price_close": {"value": 200, "is_missing": False}}, "ratios_data": {"pe_ttm": {"value": 20, "is_missing": False}}}
+    cfg = {"market_data": {"minimum_price_coverage_pct": 0.5, "minimum_fundamentals_coverage_pct": 0.5, "minimum_ratios_coverage_pct": 1.0, "minimum_metadata_coverage_pct": None}}
+    assert not run_demo.has_sufficient_data_for_scoring(asset, cfg)

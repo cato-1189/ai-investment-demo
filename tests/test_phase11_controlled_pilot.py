@@ -140,3 +140,22 @@ def test_benchmarks_outside_scoring_default():
     check = next(check for check in report["checks"] if check["name"] == "benchmarks_outside_scoring")
     assert check["status"] == "PASS"
     assert check["allow_benchmarks_in_scoring"] is False
+
+
+def test_control_report_warning_pilot_cannot_mask_fail_coverage(monkeypatch, tmp_path):
+    report_dir = ROOT / "outputs" / "test_control_report_warning_pilot_cannot_mask_fail_coverage"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "real_data_pilot_report.json"
+    report_path.write_text(json.dumps({"status": "WARNING", "price_available": controlled.INVESTABLE[:1], "fundamentals_available": controlled.INVESTABLE, "ratios_available": controlled.INVESTABLE, "metadata_available": controlled.INVESTABLE, "real_data_coverage_pct": 1 / len(controlled.INVESTABLE), "warnings": [{"name": "existing_warning"}], "errors": []}), encoding="utf-8")
+    preflight = {"status": "WARNING", "errors": [], "warnings": [{"message": "warning previo"}], "safety_confirmation": {"broker_connected": False, "allow_real_orders": False, "real_orders_possible": False}, "data_readiness_status": "WARNING"}
+    cfg = config_copy()
+    cfg["market_data"] = {**cfg["market_data"], "minimum_price_coverage_pct": 0.9, "minimum_fundamentals_coverage_pct": 0.0, "minimum_ratios_coverage_pct": 0.0, "minimum_metadata_coverage_pct": None}
+    cfg["controlled_pilot_data_policy"] = {**cfg["controlled_pilot_data_policy"], "partial_coverage_below_threshold_status": "FAIL"}
+    monkeypatch.setattr(run_demo, "load_config", lambda: cfg)
+    proc = subprocess.CompletedProcess(["pilot"], 0, f"Reporte JSON: {report_path.relative_to(ROOT)}\n", "")
+
+    report = controlled.build_control_report(preflight, proc, True, controlled.sha256_file(run_demo.CONFIG_PATH))
+
+    assert report["pilot_status"] == "WARNING"
+    assert report["status"] == "FAIL"
+    assert report["data_coverage"]["effective_coverage_failures"]

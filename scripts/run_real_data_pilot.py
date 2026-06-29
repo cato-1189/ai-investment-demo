@@ -45,12 +45,25 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
     normalized = read_json(out_root / "snapshots" / "normalized_market_data.json", [])
     scored = {row.get("ticker") for row in scoring}
     normalized_by_ticker = {row.get("ticker"): row for row in normalized}
-    def category_available(row, category):
+    def category_available(row, category, *, include_estimated: bool = False):
         data = row.get(category) or {}
-        return bool(data) and any(not field.get("is_missing") for field in data.values() if isinstance(field, dict))
+        if not data:
+            return False
+        for field in data.values():
+            if not isinstance(field, dict):
+                continue
+            if field.get("is_missing"):
+                continue
+            if field.get("is_estimated") and not include_estimated:
+                continue
+            return True
+        return False
+
     price_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "price_data"))
     fundamentals_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "fundamentals_data"))
+    fundamentals_estimated_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "fundamentals_data", include_estimated=True) and t not in fundamentals_available)
     ratios_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "ratios_data"))
+    ratios_estimated_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "ratios_data", include_estimated=True) and t not in ratios_available)
     metadata_available = sorted(t for t in INVESTABLE if t in normalized_by_ticker and category_available(normalized_by_ticker[t], "metadata_data"))
     ready_for_scoring = sorted(t for t in INVESTABLE if t in scored)
     available = price_available
@@ -110,7 +123,9 @@ def build_pilot_report(out_root: Path, command: list[str], stdout: str, stderr: 
         "tickers_with_real_data_available": available,
         "price_available": price_available,
         "fundamentals_available": fundamentals_available,
+        "fundamentals_estimated_available": fundamentals_estimated_available,
         "ratios_available": ratios_available,
+        "ratios_estimated_available": ratios_estimated_available,
         "metadata_available": metadata_available,
         "ready_for_scoring": ready_for_scoring,
         "tickers_without_data": missing,
